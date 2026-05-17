@@ -9,6 +9,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS peers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
+    notes TEXT NOT NULL DEFAULT '',
     public_key TEXT NOT NULL UNIQUE,
     assigned_ip TEXT NOT NULL UNIQUE,
     created_at TEXT NOT NULL,
@@ -29,7 +30,7 @@ CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 
 def connect(path: Path | None = None) -> sqlite3.Connection:
     db_path = path or get_settings().database_path
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
@@ -38,6 +39,10 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        columns = {row["name"] for row in conn.execute("PRAGMA table_info(peers)").fetchall()}
+        if "notes" not in columns:
+            conn.execute("ALTER TABLE peers ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
+        conn.commit()
 
 
 def get_db() -> Iterator[sqlite3.Connection]:

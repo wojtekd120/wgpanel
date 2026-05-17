@@ -1,6 +1,6 @@
 # WGPanel
 
-**Version:** `0.1.0-beta`
+**Version:** `0.1.1-beta`
 > Status: beta / testing version.
 
 Self-hosted WireGuard admin panel for Ubuntu/Debian.
@@ -91,6 +91,12 @@ docker compose build wgpanel
 docker compose run --rm --entrypoint python wgpanel scripts/hash_password.py
 ```
 
+With the legacy Compose binary, use the same command shape:
+
+```bash
+docker-compose run --rm --entrypoint python wgpanel scripts/hash_password.py
+```
+
 Build and start WGPanel:
 
 ```bash
@@ -114,7 +120,7 @@ The app listens on `127.0.0.1:8080` by default through host networking. Put it b
 
 The Compose file stores SQLite data in the `wgpanel-data` Docker volume, bind mounts host `/etc/wireguard` read/write, and uses a tmpfs at `/run/wgpanel` for generated candidate configs. The container does not use `privileged: true`. The image grants `cap_net_admin` only to `/usr/bin/wg` so the unprivileged FastAPI process can read `wg show wg0 dump`; config application still goes through the sudo-limited helper.
 
-On startup, the container changes the group of `/etc/wireguard/wg0.conf` to `wgpanel` and grants group read permission so the non-root app can read the bind-mounted host config. After applying a new config, the helper keeps `/etc/wireguard/wg0.conf` root-owned with group `wgpanel` and mode `0640`.
+On startup, the container ensures `/etc/wireguard` exists, sets it to `root:wgpanel` with mode `0750`, and if `/etc/wireguard/wg0.conf` exists sets it to `root:wgpanel` with mode `0640`. Do not use `0644` for `wg0.conf`; it contains the server private key. After applying a new config, the helper keeps `/etc/wireguard/wg0.conf` root-owned with group `wgpanel` and mode `0640`.
 
 Useful verification commands:
 
@@ -217,10 +223,30 @@ Serve `127.0.0.1:8080` behind Nginx/Caddy with HTTPS. Keep `WGPANEL_SECURE_COOKI
 
 - `GET /healthz` returns a simple unauthenticated health response for container and reverse-proxy checks.
 - Dashboard reads live status from `wg show wg0 dump`.
-- Peer metadata is stored in SQLite: name, public key, assigned IP, created time, disabled flag, optional expiry.
+- Peer metadata is stored in SQLite: name, notes, public key, assigned IP, created time, disabled flag, optional expiry.
 - New clients receive the next free IP from `10.8.0.0/24`, skipping `10.8.0.1`.
 - Peer names, WireGuard keys, IPs, and CIDRs are validated. Names containing shell metacharacters are rejected.
 - Dry-run peer creation renders the server/client config and QR code but does not persist metadata or apply WireGuard changes.
+- Client private keys are shown only once after peer creation and are not stored.
+
+## Future work
+
+- Bandwidth limiting is not supported in this beta. WireGuard does not provide native per-peer bandwidth limits; this requires `tc`/`nftables` integration.
+
+## Deploy an update on Docker
+
+On the Debian Docker test VM:
+
+```bash
+cd /opt/wgpanel
+git pull
+docker compose build --no-cache wgpanel
+docker compose up -d
+docker compose logs -f
+docker compose exec wgpanel wg show wg0
+```
+
+If you use the legacy Compose binary, replace `docker compose` with `docker-compose`.
 
 ## Tests
 

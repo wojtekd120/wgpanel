@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class LoginRequest(BaseModel):
@@ -12,10 +12,45 @@ class CreatePeerRequest(BaseModel):
     expires_at: datetime | None = None
     dry_run: bool = False
 
+    @field_validator("name")
+    @classmethod
+    def name_required(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("Peer name is required")
+        return value
+
+    @field_validator("expires_at", mode="before")
+    @classmethod
+    def empty_expiration_is_none(cls, value):
+        if value == "":
+            return None
+        return value
+
+
+class UpdatePeerRequest(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    notes: str | None = Field(default=None, max_length=2000)
+    expires_at: datetime | None = None
+
+    @field_validator("name")
+    @classmethod
+    def optional_name_not_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("Peer name is required")
+        return value
+
+    @field_validator("expires_at", mode="before")
+    @classmethod
+    def empty_expiration_is_none(cls, value):
+        if value == "":
+            return None
+        return value
+
 
 class Peer(BaseModel):
     id: int
     name: str
+    notes: str
     public_key: str
     assigned_ip: str
     created_at: datetime

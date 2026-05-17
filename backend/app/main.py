@@ -6,13 +6,15 @@ from pathlib import Path
 
 import qrcode
 from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.requests import Request
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .config_apply import apply_config_with_helper
 from .db import connect, get_db, init_db
-from .models import CreatePeerRequest, CreatePeerResponse, Dashboard, LoginRequest, Peer, WgPeerStatus
+from .models import CreatePeerRequest, CreatePeerResponse, Dashboard, LoginRequest, Peer, UpdatePeerRequest, WgPeerStatus
 from .security import new_session_token, session_expiry, token_digest, utcnow, verify_password
 from .settings import Settings, get_settings
 from .validators import validate_peer_name
@@ -45,6 +47,22 @@ def startup() -> None:
     init_db()
 
 
+@app.exception_handler(RequestValidationError)
+def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    for error in exc.errors():
+        field = error.get("loc", [None])[-1]
+        error_type = error.get("type", "")
+        message = str(error.get("msg", "Invalid request"))
+        if field == "name":
+            return JSONResponse(status_code=422, content={"detail": "Peer name is required"})
+        if field == "expires_at":
+            return JSONResponse(status_code=422, content={"detail": "Invalid expiration date"})
+        if error_type == "missing":
+            return JSONResponse(status_code=422, content={"detail": "Missing required field"})
+        return JSONResponse(status_code=422, content={"detail": message.replace("Value error, ", "")})
+    return JSONResponse(status_code=422, content={"detail": "Invalid request"})
+
+
 @app.get("/healthz")
 def healthz() -> dict[str, str]:
     return {"status": "ok"}
@@ -54,6 +72,7 @@ def row_to_peer(row: sqlite3.Row) -> Peer:
     return Peer(
         id=row["id"],
         name=row["name"],
+        notes=row["notes"] if "notes" in row.keys() else "",
         public_key=row["public_key"],
         assigned_ip=row["assigned_ip"],
         created_at=datetime.fromisoformat(row["created_at"]),
@@ -168,6 +187,7 @@ def create_peer(
         row = {
             "id": 0,
             "name": name,
+            "notes": "",
             "public_key": public_key,
             "assigned_ip": assigned_ip,
             "created_at": now.isoformat(),
@@ -177,8 +197,8 @@ def create_peer(
     else:
         db.execute(
             """
-            INSERT INTO peers (name, public_key, assigned_ip, created_at, disabled, expires_at)
-            VALUES (?, ?, ?, ?, 0, ?)
+        INSERT INTO peers (name, notes, public_key, assigned_ip, created_at, disabled, expires_at)
+        VALUES (?, '', ?, ?, ?, 0, ?)
             """,
             (
                 name,
@@ -207,6 +227,7 @@ def create_peer(
         peer=Peer(
             id=row["id"],
             name=row["name"],
+            notes=row["notes"] if "notes" in row.keys() else "",
             public_key=row["public_key"],
             assigned_ip=row["assigned_ip"],
             created_at=datetime.fromisoformat(row["created_at"]),
@@ -232,16 +253,70 @@ def read_current_config(settings: Settings) -> str:
     return read_config(settings.wg_config_path)
 
 
-@app.post("/api/peers/{peer_id}/disable", response_model=Peer, dependencies=[Depends(require_auth)])
-def disable_peer(
+def set_peer_disabled(
     peer_id: int,
+    disabled: bool,
     settings: Settings = Depends(get_settings),
     db: sqlite3.Connection = Depends(get_db),
 ) -> Peer:
     row = db.execute("SELECT * FROM peers WHERE id = ?", (peer_id,)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Peer not found")
-    db.execute("UPDATE peers SET disabled = 1 WHERE id = ?", (peer_id,))
+    db.execute("UPDATE peers SET disabled = ? WHERE id = ?", (1 if disabled else 0, peer_id))
+    apply_db_config(settings, db)
+    db.commit()
+    return row_to_peer(db.execute("SELECT * FROM peers WHERE id = ?", (peer_id,)).fetchone())
+
+
+@app.post("/api/peers/{peer_id}/disable", response_model=Peer, dependencies=[Depends(require_auth)])
+def disable_peer(
+    peer_id: int,
+    settings: Settings = Depends(get_settings),
+    db: sqlite3.Connection = Depends(get_db),
+) -> Peer:
+    return set_peer_disabled(peer_id, True, settings, db)
+
+
+@app.post("/api/peers/{peer_id}/enable", response_model=Peer, dependencies=[Depends(require_auth)])
+def enable_peer(
+    peer_id: int,
+    settings: Settings = Depends(get_settings),
+    db: sqlite3.Connection = Depends(get_db),
+) -> Peer:
+    return set_peer_disabled(peer_id, False, settings, db)
+
+
+@app.post("/api/peers/{peer_id}/toggle", response_model=Peer, dependencies=[Depends(require_auth)])
+def toggle_peer(
+    peer_id: int,
+    settings: Settings = Depends(get_settings),
+    db: sqlite3.Connection = Depends(get_db),
+) -> Peer:
+    row = db.execute("SELECT disabled FROM peers WHERE id = ?", (peer_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Peer not found")
+    return set_peer_disabled(peer_id, not bool(row["disabled"]), settings, db)
+
+
+@app.patch("/api/peers/{peer_id}", response_model=Peer, dependencies=[Depends(require_auth)])
+def update_peer(
+    peer_id: int,
+    payload: UpdatePeerRequest,
+    settings: Settings = Depends(get_settings),
+    db: sqlite3.Connection = Depends(get_db),
+) -> Peer:
+    row = db.execute("SELECT * FROM peers WHERE id = ?", (peer_id,)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Peer not found")
+    name = validate_peer_name(payload.name) if payload.name is not None else row["name"]
+    notes = payload.notes if payload.notes is not None else row["notes"]
+    expires_at = payload.expires_at.isoformat() if payload.expires_at else None
+    if payload.expires_at is None and "expires_at" not in payload.model_fields_set:
+        expires_at = row["expires_at"]
+    db.execute(
+        "UPDATE peers SET name = ?, notes = ?, expires_at = ? WHERE id = ?",
+        (name, notes, expires_at, peer_id),
+    )
     apply_db_config(settings, db)
     db.commit()
     return row_to_peer(db.execute("SELECT * FROM peers WHERE id = ?", (peer_id,)).fetchone())

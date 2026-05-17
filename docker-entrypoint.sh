@@ -5,9 +5,13 @@ mkdir -p /var/lib/wgpanel /run/wgpanel
 chown wgpanel:wgpanel /var/lib/wgpanel /run/wgpanel
 chmod 750 /var/lib/wgpanel /run/wgpanel
 
+mkdir -p /etc/wireguard
+chown root:wgpanel /etc/wireguard
+chmod 750 /etc/wireguard
+
 if [ -f /etc/wireguard/wg0.conf ]; then
-  chgrp wgpanel /etc/wireguard/wg0.conf
-  chmod g+r /etc/wireguard/wg0.conf
+  chown root:wgpanel /etc/wireguard/wg0.conf
+  chmod 640 /etc/wireguard/wg0.conf
 fi
 
 if [ ! -c /dev/net/tun ]; then
