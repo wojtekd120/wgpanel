@@ -1,0 +1,40 @@
+# Local environment
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+backend/.venv/
+
+# Node / frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# SQLite databases
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+
+# WireGuard secrets and generated configs
+*.key
+*.private
+privatekey
+private.key
+client-*.conf
+clients/*.conf
+generated/*.conf
+wg0.conf
+wg0.conf.bak
+
+# Logs and OS clutter
+*.log
+.DS_Store
+Thumbs.db

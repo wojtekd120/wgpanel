@@ -1,0 +1,1 @@
+wgpanel ALL=(root) NOPASSWD: /usr/local/sbin/wgpanel-helper apply --config /run/wgpanel/*.conf
