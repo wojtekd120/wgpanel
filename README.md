@@ -1,5 +1,8 @@
 # WGPanel
 
+**Version:** `0.1.0-beta`
+> Status: beta / testing version.
+
 Self-hosted WireGuard admin panel for Ubuntu/Debian.
 
 ## Stack
