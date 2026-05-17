@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { Circle, Download, KeyRound, LogOut, Moon, Plus, RefreshCw, ShieldOff, Sun, Trash2, X } from 'lucide-react'
+import { Circle, Download, KeyRound, LogOut, Moon, Plus, RefreshCw, RotateCcw, ShieldOff, Sun, Trash2, X } from 'lucide-react'
 import './styles.css'
 
 const friendlyError = (body, fallback = 'Something went wrong. Please try again.') => {
@@ -125,6 +125,11 @@ function App() {
   const [currentInterface, setCurrentInterface] = useState('wg0')
   const [setupRequired, setSetupRequired] = useState(false)
   const [banner, setBanner] = useState('')
+  const [backups, setBackups] = useState([])
+  const [onboarding, setOnboarding] = useState([])
+  const [backupDiff, setBackupDiff] = useState('')
+  const [restoreTarget, setRestoreTarget] = useState(null)
+  const [restoreText, setRestoreText] = useState('')
   const [result, setResult] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
   const [deleteTarget, setDeleteTarget] = useState(null)
@@ -137,9 +142,11 @@ function App() {
       const setup = await fetch('/api/setup/status').then((r) => r.json()).catch(() => ({ setup_required: false }))
       setSetupRequired(setup.setup_required)
       if (setup.setup_required) return
-      const [dash, peerRows, ifaceRows, selected] = await Promise.all([api('/dashboard'), api('/peers'), api('/interfaces'), api('/settings/interface')])
+      const [dash, peerRows, ifaceRows, selected, backupRows, onboardingRows] = await Promise.all([api('/dashboard'), api('/peers'), api('/interfaces'), api('/settings/interface'), api('/backups'), api('/onboarding')])
       setDashboard(dash)
       setPeers(peerRows)
+      setBackups(backupRows.backups || [])
+      setOnboarding(onboardingRows || [])
       setInterfaces(ifaceRows.interfaces || [])
       setCurrentInterface(selected.interface)
       setAuthed(true)
@@ -204,7 +211,7 @@ function App() {
       setResult(created)
       setSelectedId(created.peer.id || selectedId)
       setForm({ name: '', expires_at: '', no_expiration: true, dry_run: false, tunnel_mode: 'split', custom_allowed_ips: '', client_dns: '' })
-      setBanner(created.dry_run ? 'Dry run generated successfully' : 'Peer created successfully')
+      setBanner(created.dry_run ? 'Preview generated successfully' : 'Peer created successfully')
       await load()
     } catch (err) {
       setBanner(err.message || 'Unable to create peer')
@@ -227,6 +234,11 @@ function App() {
     if (!result?.client_config) return
     await navigator.clipboard.writeText(result.client_config)
     setBanner('Client config copied')
+  }
+
+  const copyPublicKey = async (publicKey) => {
+    await navigator.clipboard.writeText(publicKey)
+    setBanner('Public key copied')
   }
 
   const downloadConfig = () => {
@@ -252,6 +264,18 @@ function App() {
       await load()
     } catch (err) {
       setBanner(err.message || 'Unable to take ownership')
+    }
+  }
+
+  const switchInterface = async (value) => {
+    try {
+      await api('/settings/interface', { method: 'POST', body: JSON.stringify({ interface: value }) })
+      setCurrentInterface(value)
+      setSelectedId(null)
+      setBackupDiff('')
+      await load()
+    } catch (err) {
+      setBanner(err.message || 'Unable to switch interface')
     }
   }
 
@@ -297,6 +321,32 @@ function App() {
     setAuthed(false)
   }
 
+  const viewBackupDiff = async (backup) => {
+    try {
+      const data = await api(`/backups/${encodeURIComponent(backup.name)}/diff`)
+      setBackupDiff(data.diff || 'No differences')
+    } catch (err) {
+      setBanner(err.message || 'Unable to load backup diff')
+    }
+  }
+
+  const restoreBackup = async () => {
+    if (!restoreTarget) return
+    try {
+      await api(`/backups/${encodeURIComponent(restoreTarget.name)}/restore`, {
+        method: 'POST',
+        body: JSON.stringify({ confirmation: restoreText }),
+      })
+      setBanner('Backup restored')
+      setRestoreTarget(null)
+      setRestoreText('')
+      setBackupDiff('')
+      await load()
+    } catch (err) {
+      setBanner(err.message || 'Unable to restore backup')
+    }
+  }
+
   if (setupRequired || window.location.pathname === '/setup') return <Setup />
   if (!authed) return <Login onLogin={load} />
 
@@ -321,6 +371,25 @@ function App() {
 
       {banner && <div className="banner">{banner}</div>}
       <div className="notice">Existing unmanaged peers are preserved. WGPanel only modifies peers it manages.</div>
+
+      <section className="onboarding">
+        <div className="section-head">
+          <h2>Setup Checklist</h2>
+          <span>{currentInterface}</span>
+        </div>
+        <div className="checklist">
+          {onboarding.map((check) => (
+            <div className={`check-card ${check.state}`} key={check.key}>
+              <div>
+                <span className={`badge ${check.state}`}>{check.state}</span>
+                <strong>{check.label}</strong>
+              </div>
+              <p>{check.detail}</p>
+              {check.fix && <code>{check.fix}</code>}
+            </div>
+          ))}
+        </div>
+      </section>
 
       <section className="stats">
         <div><span>Status</span><strong className={dashboard?.up ? 'ok' : 'down'}><Circle size={12} fill="currentColor" />{dashboard?.up ? 'Up' : 'Down'}</strong></div>
@@ -364,7 +433,8 @@ function App() {
           </label>
           <label className="check-row">
             <input type="checkbox" checked={form.dry_run} onChange={(event) => setForm({ ...form, dry_run: event.target.checked })} />
-            Dry run
+            Preview changes
+            <small>Advanced: show the generated config without modifying WireGuard.</small>
           </label>
           <button><Plus size={18} /> Create</button>
         </form>
@@ -380,7 +450,12 @@ function App() {
                 <span>{peer.name}</span>
                 <span className={peer.status === 'Unmanaged' ? 'badge unmanaged' : peer.status === 'Expired' ? 'badge expired' : peer.disabled ? 'badge off' : 'badge on'}>{peer.status}</span>
                 <span>{peer.assigned_ip}</span>
-                <span>{live?.latest_handshake ? new Date(live.latest_handshake * 1000).toLocaleString() : 'never'}</span>
+                <span>
+                  <span className={`badge activity ${live?.activity_status === 'Active' ? 'on' : live?.activity_status === 'Recent' ? 'recent' : live?.activity_status === 'Stale' ? 'expired' : 'off'}`}>
+                    {live?.activity_status || 'Never connected'}
+                  </span>
+                  <small>{live?.latest_handshake ? new Date(live.latest_handshake * 1000).toLocaleString() : 'never'}</small>
+                </span>
                 <span>{live ? `${formatBytes(live.transfer_rx)} / ${formatBytes(live.transfer_tx)}` : '0 B / 0 B'}</span>
                 <span className="row-actions">
                   {peer.managed ? (
@@ -409,8 +484,9 @@ function App() {
             <div><span>Created</span><strong>{formatDate(selectedPeer.created_at)}</strong></div>
             <div><span>Expires</span><strong>{selectedPeer.expires_at ? formatDate(selectedPeer.expires_at) : 'No expiration'}</strong></div>
             <div><span>Latest handshake</span><strong>{selectedStatus?.latest_handshake ? new Date(selectedStatus.latest_handshake * 1000).toLocaleString() : 'never'}</strong></div>
+            <div><span>Activity</span><strong><span className={`badge activity ${selectedStatus?.activity_status === 'Active' ? 'on' : selectedStatus?.activity_status === 'Recent' ? 'recent' : selectedStatus?.activity_status === 'Stale' ? 'expired' : 'off'}`}>{selectedStatus?.activity_status || 'Never connected'}</span></strong></div>
             <div><span>RX / TX</span><strong>{selectedStatus ? `${formatBytes(selectedStatus.transfer_rx)} / ${formatBytes(selectedStatus.transfer_tx)}` : '0 B / 0 B'}</strong></div>
-            <div className="wide"><span>Public key</span><code>{selectedPeer.public_key}</code></div>
+            <div className="wide key-line"><span>Public key</span><code>{selectedPeer.public_key}</code><button className="small-button" onClick={() => copyPublicKey(selectedPeer.public_key)}>Copy</button></div>
             <div className="wide"><span>Client config</span><strong>{selectedPeer.managed ? 'Client private key is not stored, so this config cannot be regenerated.' : 'Unmanaged peer. Client private key is not stored, so this config cannot be regenerated.'}</strong></div>
           </div>
           {selectedPeer.managed && <div className="edit-panel">
@@ -423,11 +499,37 @@ function App() {
         </section>
       )}
 
+      <section className="details">
+        <div className="detail-grid">
+          <div className="wide">
+            <h2>Backups</h2>
+            <p className="muted">Diffs are redacted before display. PrivateKey values are never shown.</p>
+          </div>
+          {backups.length === 0 && <div className="wide"><strong>No backups found for {currentInterface}</strong></div>}
+          {backups.map((backup) => (
+            <div className="wide backup-row" key={backup.name}>
+              <div>
+                <strong>{backup.timestamp}</strong>
+                <span>{backup.interface} - {backup.size} B</span>
+              </div>
+              <div className="row-actions">
+                <button className="small-button" onClick={() => viewBackupDiff(backup)}>View diff</button>
+                <button className="small-button" onClick={() => { setRestoreTarget(backup); setRestoreText('') }}><RotateCcw size={16} /> Restore</button>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="edit-panel">
+          <h2>Redacted Diff</h2>
+          <pre>{backupDiff || 'Select a backup to view its diff against the current config.'}</pre>
+        </div>
+      </section>
+
       {result && (
         <section className="result">
           <div>
             <div className="result-head">
-              <h2>{result.dry_run ? 'Dry-run client config' : 'Client config'}</h2>
+              <h2>{result.dry_run ? 'Preview client config' : 'Client config'}</h2>
               <button className="icon-button" onClick={() => setResult(null)} title="Hide config"><X size={18} /></button>
             </div>
             <p className="warning">Save this configuration now. The private key is shown only once and cannot be recovered later.</p>
@@ -454,18 +556,22 @@ function App() {
           </div>
         </div>
       )}
+
+      {restoreTarget && (
+        <div className="modal-backdrop">
+          <div className="modal">
+            <h2>Restore backup?</h2>
+            <p>This creates a fresh backup first, then restores {restoreTarget.name}. Type RESTORE {currentInterface} to continue.</p>
+            <input value={restoreText} onChange={(event) => setRestoreText(event.target.value)} />
+            <div className="modal-actions">
+              <button className="secondary" onClick={() => setRestoreTarget(null)}>Cancel</button>
+              <button className="danger-button" onClick={restoreBackup}>Restore</button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   )
 }
 
 createRoot(document.getElementById('root')).render(<App />)
-  const switchInterface = async (value) => {
-    try {
-      await api('/settings/interface', { method: 'POST', body: JSON.stringify({ interface: value }) })
-      setCurrentInterface(value)
-      setSelectedId(null)
-      await load()
-    } catch (err) {
-      setBanner(err.message || 'Unable to switch interface')
-    }
-  }

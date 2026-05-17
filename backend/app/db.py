@@ -34,6 +34,13 @@ CREATE TABLE IF NOT EXISTS app_settings (
     value TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS deleted_peers (
+    interface_name TEXT NOT NULL,
+    public_key TEXT NOT NULL,
+    deleted_at TEXT NOT NULL,
+    PRIMARY KEY (interface_name, public_key)
+);
+
 CREATE TABLE IF NOT EXISTS setup_tokens (
     token_digest TEXT PRIMARY KEY,
     created_at TEXT NOT NULL,
@@ -49,6 +56,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE INDEX IF NOT EXISTS idx_peers_disabled ON peers(disabled);
 CREATE INDEX IF NOT EXISTS idx_peers_interface ON peers(interface_name);
+CREATE INDEX IF NOT EXISTS idx_deleted_peers_interface ON deleted_peers(interface_name);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 """
 

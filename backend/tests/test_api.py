@@ -18,11 +18,12 @@ KEY_C = "C" * 43 + "="
 def api_client(tmp_path, monkeypatch):
     db_path = tmp_path / "wgpanel.db"
     config_path = tmp_path / "wg0.conf"
-    config_path.write_text("[Interface]\nAddress = 10.8.0.1/24\nListenPort = 51820\n", encoding="utf-8")
+    config_path.write_text("[Interface]\nPrivateKey = server-secret\nAddress = 10.8.0.1/24\nListenPort = 51820\n", encoding="utf-8")
 
     settings = main.Settings(
         database_path=db_path,
         wg_config_path=config_path,
+        backup_dir=tmp_path / "backups",
         helper_path=Path("/usr/local/sbin/wgpanel-helper"),
         run_dir=tmp_path / "run",
         server_public_key=KEY_A,
@@ -39,6 +40,7 @@ def api_client(tmp_path, monkeypatch):
 
     monkeypatch.setattr(main, "generate_keypair", fake_keypair)
     monkeypatch.setattr(main, "apply_config_with_helper", lambda *args, **kwargs: str(tmp_path / "candidate.conf"))
+    monkeypatch.setattr(main, "restore_backup_with_helper", lambda *args, **kwargs: None)
     main.app.dependency_overrides[main.require_auth] = lambda: None
     main.app.dependency_overrides[get_settings] = lambda: settings
 
@@ -53,7 +55,7 @@ def api_client(tmp_path, monkeypatch):
     monkeypatch.setattr("app.db.get_settings", lambda: settings)
     init_db()
 
-    client = TestClient(main.app)
+    client = TestClient(main.app, raise_server_exceptions=False)
     try:
         yield client
     finally:
@@ -72,6 +74,16 @@ def test_empty_expires_at_is_accepted(api_client):
 
     assert response.status_code == 200
     assert response.json()["peer"]["expires_at"] is None
+
+
+def test_create_peer_redacts_preview_but_returns_one_time_client_config(api_client):
+    response = api_client.post("/api/peers", json={"name": "alice"})
+
+    body = response.json()
+    assert response.status_code == 200
+    assert "PrivateKey = server-secret" not in body["server_config_preview"]
+    assert "PrivateKey = <redacted>" in body["server_config_preview"]
+    assert "PrivateKey = " in body["client_config"]
 
 
 def test_invalid_expires_at_returns_readable_422(api_client):
@@ -156,6 +168,19 @@ def test_invalid_custom_allowed_ips_is_readable(api_client):
     assert "AllowedIPs" in response.json()["detail"]
 
 
+def test_error_responses_are_redacted(api_client, monkeypatch):
+    def fail_apply(*args, **kwargs):
+        raise RuntimeError("wg failed\nPrivateKey = secret-from-error")
+
+    monkeypatch.setattr(main, "apply_config_with_helper", fail_apply)
+
+    response = api_client.post("/api/peers", json={"name": "alice"})
+
+    assert response.status_code == 500
+    assert "secret-from-error" not in response.json()["detail"]
+    assert "PrivateKey = <redacted>" in response.json()["detail"]
+
+
 def test_docker_entrypoint_permission_logic_is_documented():
     entrypoint = Path(__file__).resolve().parents[2] / "docker-entrypoint.sh"
     text = entrypoint.read_text(encoding="utf-8")
@@ -166,3 +191,95 @@ def test_docker_entrypoint_permission_logic_is_documented():
     assert "chown root:wgpanel /etc/wireguard/wg0.conf" in text
     assert "chmod 640 /etc/wireguard/wg0.conf" in text
     assert "chmod 644" not in text
+
+
+def test_backup_listing_redacted_diff_and_restore_confirmation(api_client, tmp_path):
+    settings = main.app.dependency_overrides[main.get_settings]()
+    backup_dir = settings.backup_dir
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup = backup_dir / "wg0.conf.20260101-120000.bak"
+    backup.write_text(
+        "[Interface]\nPrivateKey = backup-secret\nAddress = 10.8.0.99/24\n",
+        encoding="utf-8",
+    )
+    settings.wg_config_path.write_text(
+        "[Interface]\nPrivateKey = current-secret\nAddress = 10.8.0.1/24\n",
+        encoding="utf-8",
+    )
+
+    listed = api_client.get("/api/backups")
+    assert listed.status_code == 200
+    assert listed.json()["backups"][0]["name"] == backup.name
+    assert listed.json()["backups"][0]["interface"] == "wg0"
+    assert listed.json()["backups"][0]["size"] > 0
+
+    diff = api_client.get(f"/api/backups/{backup.name}/diff")
+    assert diff.status_code == 200
+    assert "backup-secret" not in diff.json()["diff"]
+    assert "current-secret" not in diff.json()["diff"]
+    assert "PrivateKey = <redacted>" in diff.json()["diff"]
+
+    denied = api_client.post(f"/api/backups/{backup.name}/restore", json={"confirmation": "RESTORE wrong"})
+    assert denied.status_code == 422
+
+    restored = api_client.post(f"/api/backups/{backup.name}/restore", json={"confirmation": "RESTORE wg0"})
+    assert restored.status_code == 200
+    assert restored.json()["detail"] == "Backup restored"
+
+
+def test_delete_managed_peer_removes_config_and_does_not_reappear_unmanaged(api_client, monkeypatch):
+    settings = main.app.dependency_overrides[main.get_settings]()
+
+    def write_candidate(_helper, _run_dir, config_text, _dry_run, _interface):
+        settings.wg_config_path.write_text(config_text, encoding="utf-8")
+        return str(settings.wg_config_path)
+
+    monkeypatch.setattr(main, "apply_config_with_helper", write_candidate)
+    created = api_client.post("/api/peers", json={"name": "alice"}).json()["peer"]
+    managed_key = created["public_key"]
+    settings.wg_config_path.write_text(
+        settings.wg_config_path.read_text(encoding="utf-8")
+        + f"\n[Peer]\nPublicKey = {KEY_B}\nAllowedIPs = 10.8.0.99/32\n",
+        encoding="utf-8",
+    )
+
+    deleted = api_client.delete(f"/api/peers/{created['id']}")
+
+    assert deleted.status_code == 200
+    rendered = settings.wg_config_path.read_text(encoding="utf-8")
+    assert managed_key not in rendered
+    assert KEY_B in rendered
+
+    monkeypatch.setattr(
+        main,
+        "run_wg_dump",
+        lambda _interface: "\n".join(
+            [
+                f"{KEY_A}\t51820\toff\tfwmark",
+                f"{KEY_B}\t(none)\t198.51.100.4:51820\t10.8.0.99/32\t0\t0\t0\toff",
+            ]
+        ),
+    )
+    dashboard = api_client.get("/api/dashboard").json()
+    assert managed_key not in {peer["public_key"] for peer in dashboard["peers"]}
+    assert dashboard["peers"][0]["activity_status"] == "Never connected"
+
+    listed = api_client.get("/api/peers").json()
+    public_keys = {peer["public_key"] for peer in listed}
+    assert managed_key not in public_keys
+    assert KEY_B in public_keys
+    assert next(peer for peer in listed if peer["public_key"] == KEY_B)["managed"] is False
+
+
+def test_delete_apply_failure_keeps_metadata(api_client, monkeypatch):
+    created = api_client.post("/api/peers", json={"name": "alice"}).json()["peer"]
+
+    def fail_apply(*_args, **_kwargs):
+        raise RuntimeError("apply failed")
+
+    monkeypatch.setattr(main, "apply_config_with_helper", fail_apply)
+    deleted = api_client.delete(f"/api/peers/{created['id']}")
+
+    assert deleted.status_code == 500
+    listed = api_client.get("/api/peers").json()
+    assert created["public_key"] in {peer["public_key"] for peer in listed}

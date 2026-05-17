@@ -1,7 +1,9 @@
 import base64
 import difflib
 import io
+import os
 import sqlite3
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -13,28 +15,28 @@ from fastapi.requests import Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config_apply import apply_config_with_helper
+from .config_apply import apply_config_with_helper, restore_backup_with_helper
 from .db import connect, get_db, init_db
-from .models import ConfigDiffRequest, CreatePeerRequest, CreatePeerResponse, Dashboard, InterfaceSelectionRequest, LoginRequest, Peer, SetupRequest, TakeOwnershipRequest, UpdatePeerRequest, WgPeerStatus
+from .models import ConfigDiffRequest, CreatePeerRequest, CreatePeerResponse, Dashboard, InterfaceSelectionRequest, LoginRequest, OnboardingCheck, Peer, RestoreBackupRequest, SetupRequest, TakeOwnershipRequest, UpdatePeerRequest, WgPeerStatus
+from .redaction import redact, redact_text
 from .security import hash_password, new_session_token, new_setup_token, session_expiry, setup_expiry, token_digest, utcnow, verify_password
 from .settings import Settings, get_settings
 from .validators import validate_peer_name
 from .wireguard import (
     allocate_next_ip,
-    append_peer_to_config,
     generate_keypair,
     config_path_for_interface,
     parse_config_peer_blocks,
     parse_wg_dump,
     read_config,
     render_client_config,
-    render_config_with_active_peers,
-    render_server_peer_block,
+    render_config_with_managed_keys,
     run_wg_dump,
     run_wg_interfaces,
     unmanaged_used_ips,
     validate_allowed_ips,
     validate_interface_name,
+    handshake_activity_status,
 )
 
 app = FastAPI(title="WGPanel")
@@ -71,8 +73,18 @@ def validation_exception_handler(request: Request, exc: RequestValidationError) 
             return JSONResponse(status_code=422, content={"detail": "Invalid AllowedIPs"})
         if error_type == "missing":
             return JSONResponse(status_code=422, content={"detail": "Missing required field"})
-        return JSONResponse(status_code=422, content={"detail": message.replace("Value error, ", "")})
+        return JSONResponse(status_code=422, content={"detail": redact_text(message.replace("Value error, ", ""))})
     return JSONResponse(status_code=422, content={"detail": "Invalid request"})
+
+
+@app.exception_handler(HTTPException)
+def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content={"detail": redact(exc.detail)})
+
+
+@app.exception_handler(Exception)
+def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    return JSONResponse(status_code=500, content={"detail": redact_text(str(exc) or "Internal server error")})
 
 
 @app.get("/healthz")
@@ -111,6 +123,24 @@ def config_path_for_selected_interface(interface: str) -> Path:
     return config_path_for_interface(interface)
 
 
+def redact_private_keys(config_text: str) -> str:
+    return redact_text(config_text)
+
+
+def backup_path_from_name(settings: Settings, interface: str, name: str) -> Path:
+    if Path(name).name != name:
+        raise HTTPException(status_code=422, detail="Invalid backup name")
+    if not name.startswith(f"{interface}.conf.") or not name.endswith(".bak"):
+        raise HTTPException(status_code=422, detail="Backup does not belong to selected interface")
+    backup_path = (settings.backup_dir / name).resolve()
+    backup_dir = settings.backup_dir.resolve()
+    if backup_path.parent != backup_dir:
+        raise HTTPException(status_code=422, detail="Invalid backup path")
+    if not backup_path.is_file():
+        raise HTTPException(status_code=404, detail="Backup not found")
+    return backup_path
+
+
 def admin_exists(conn: sqlite3.Connection) -> bool:
     return conn.execute("SELECT 1 FROM admins LIMIT 1").fetchone() is not None
 
@@ -145,7 +175,8 @@ def ensure_setup_token(conn: sqlite3.Connection, settings: Settings) -> None:
     token_path.write_text(token, encoding="utf-8")
     token_path.chmod(0o600)
     print("First-run setup is active. Complete setup immediately or stop the service.")
-    print(f"Setup URL: http://127.0.0.1:8080/setup?token={token}")
+    print(redact_text(f"Setup URL: http://127.0.0.1:8080/setup?token={token}"))
+    print("Read the one-time setup token from /var/lib/wgpanel/setup-token on the server.")
 
 
 def setup_required() -> bool:
@@ -196,6 +227,12 @@ def unmanaged_peer_from_block(index: int, block, interface: str) -> Peer:
         status="Unmanaged",
         interface_name=interface,
     )
+
+
+def managed_public_keys_for_interface(db: sqlite3.Connection, interface: str) -> set[str]:
+    rows = db.execute("SELECT public_key FROM peers WHERE managed = 1 AND interface_name = ?", (interface,)).fetchall()
+    deleted = db.execute("SELECT public_key FROM deleted_peers WHERE interface_name = ?", (interface,)).fetchall()
+    return {row["public_key"] for row in rows} | {row["public_key"] for row in deleted}
 
 
 def require_auth(request: Request, settings: Settings = Depends(get_settings)) -> None:
@@ -345,10 +382,108 @@ def dashboard(
                 transfer_rx=p.transfer_rx,
                 transfer_tx=p.transfer_tx,
                 persistent_keepalive=p.persistent_keepalive,
+                activity_status=handshake_activity_status(p.latest_handshake),
             )
             for p in peers
         ],
     )
+
+
+@app.get("/api/onboarding", response_model=list[OnboardingCheck], dependencies=[Depends(require_auth)])
+def onboarding_checks(
+    interface: str = Depends(get_interface_from_request),
+    settings: Settings = Depends(get_settings),
+    db: sqlite3.Connection = Depends(get_db),
+) -> list[OnboardingCheck]:
+    checks: list[OnboardingCheck] = []
+    config_path = settings.wg_config_path if interface == settings.interface else config_path_for_selected_interface(interface)
+
+    def add(key: str, label: str, state: str, detail: str, fix: str = "") -> None:
+        checks.append(OnboardingCheck(key=key, label=label, state=state, detail=detail, fix=fix))
+
+    try:
+        active_interfaces = set(run_wg_interfaces())
+    except Exception:
+        active_interfaces = set()
+
+    if interface in active_interfaces:
+        add("interface_exists", "Selected interface exists", "pass", f"{interface} is active on the host.")
+    else:
+        add("interface_exists", "Selected interface exists", "fail", f"{interface} is not reported by wg show interfaces.", f"sudo systemctl start wg-quick@{interface}")
+
+    if config_path.exists():
+        add("config_exists", "WireGuard config exists", "pass", f"{config_path} exists.")
+    else:
+        add("config_exists", "WireGuard config exists", "fail", f"{config_path} is missing.", f"sudo nano {config_path}")
+
+    try:
+        read_config(config_path)
+        add("config_readable", "Config readable", "pass", "WGPanel can read the WireGuard config.")
+    except Exception:
+        add(
+            "config_readable",
+            "Config readable",
+            "fail",
+            f"WGPanel cannot read {config_path}.",
+            f"sudo chown root:wgpanel /etc/wireguard {config_path} && sudo chmod 750 /etc/wireguard && sudo chmod 640 {config_path}",
+        )
+
+    try:
+        run_wg_dump(interface)
+        add("wg_show", "wg show works", "pass", f"wg show {interface} dump succeeded.")
+    except Exception:
+        add("wg_show", "wg show works", "fail", f"wg show {interface} dump failed.", f"docker-compose exec wgpanel wg show {interface}")
+
+    backup_dir = settings.backup_dir
+    if backup_dir.exists() and os.access(backup_dir, os.W_OK):
+        add("backup_dir", "Backup directory writable", "pass", f"{backup_dir} exists and is writable.")
+    elif backup_dir.exists():
+        add("backup_dir", "Backup directory writable", "fail", f"{backup_dir} exists but is not writable.", f"sudo chown root:wgpanel {backup_dir} && sudo chmod 750 {backup_dir}")
+    else:
+        add("backup_dir", "Backup directory writable", "warn", f"{backup_dir} does not exist yet.", f"sudo mkdir -p {backup_dir} && sudo chown root:wgpanel {backup_dir} && sudo chmod 750 {backup_dir}")
+
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "-l", str(settings.helper_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        helper_output = (result.stdout or "") + (result.stderr or "")
+        if result.returncode == 0 and str(settings.helper_path) in helper_output:
+            add("helper_sudo", "Helper sudo permission works", "pass", "sudoers allows the restricted helper.")
+        else:
+            add("helper_sudo", "Helper sudo permission works", "fail", "sudoers did not confirm helper access.", "sudo visudo -cf /etc/sudoers.d/wgpanel")
+    except Exception:
+        add("helper_sudo", "Helper sudo permission works", "warn", "Could not verify sudo helper access from this environment.", "docker-compose exec wgpanel sudo -n -l")
+
+    if settings.secure_cookies:
+        add("secure_cookies", "Secure cookies enabled", "pass", "Session cookies require HTTPS.")
+        add("https_proxy", "HTTPS/reverse proxy", "pass", "Use Caddy, Nginx, or another HTTPS reverse proxy in production.")
+    else:
+        add("secure_cookies", "Secure cookies enabled", "warn", "Secure cookies are disabled for HTTP testing.", "Set WGPANEL_SECURE_COOKIES=true behind HTTPS.")
+        add("https_proxy", "HTTPS/reverse proxy", "warn", "Do not expose plain HTTP to the internet.", "Use Caddy or Nginx with HTTPS before public exposure.")
+
+    try:
+        managed_keys = managed_public_keys_for_interface(db, interface)
+        unmanaged_count = sum(
+            1
+            for block in parse_config_peer_blocks(read_current_config(interface, settings))
+            if block.public_key and block.public_key not in managed_keys
+        )
+        state = "warn" if unmanaged_count else "pass"
+        add(
+            "unmanaged_peers",
+            "Unmanaged peers",
+            state,
+            f"{unmanaged_count} unmanaged peer{'s' if unmanaged_count != 1 else ''} preserved.",
+            "Use Take ownership when you want WGPanel to manage an existing peer." if unmanaged_count else "",
+        )
+    except Exception:
+        add("unmanaged_peers", "Unmanaged peers", "warn", "Could not count unmanaged peers until the config is readable.")
+
+    return checks
 
 
 @app.get("/api/peers", response_model=list[Peer], dependencies=[Depends(require_auth)])
@@ -359,7 +494,7 @@ def list_peers(
 ) -> list[Peer]:
     rows = db.execute("SELECT * FROM peers WHERE interface_name = ? ORDER BY created_at DESC", (interface,)).fetchall()
     managed = [row_to_peer(row) for row in rows]
-    managed_keys = {peer.public_key for peer in managed}
+    managed_keys = managed_public_keys_for_interface(db, interface)
     unmanaged = [
         unmanaged_peer_from_block(index, block, interface)
         for index, block in enumerate(parse_config_peer_blocks(read_current_config(interface, settings)))
@@ -392,7 +527,7 @@ def create_peer(
 
     private_key, public_key = generate_keypair()
     current_config = read_current_config(interface, settings)
-    managed_keys = {row["public_key"] for row in db.execute("SELECT public_key FROM peers WHERE interface_name = ?", (interface,)).fetchall()}
+    managed_keys = managed_public_keys_for_interface(db, interface)
     used_ips = {row["assigned_ip"] for row in db.execute("SELECT assigned_ip FROM peers WHERE interface_name = ?", (interface,)).fetchall()}
     used_ips |= unmanaged_used_ips(current_config, managed_keys)
     try:
@@ -401,10 +536,15 @@ def create_peer(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     now = utcnow()
-    peer_block = render_server_peer_block(name, public_key, assigned_ip)
     client_allowed_ips = client_allowed_ips_for_request(payload, settings)
     client_dns = payload.client_dns or settings.client_dns
-    server_config_preview = append_peer_to_config(current_config, peer_block)
+    existing_rows = db.execute(
+        "SELECT name, public_key, assigned_ip, disabled FROM peers WHERE managed = 1 AND interface_name = ? ORDER BY created_at",
+        (interface,),
+    ).fetchall()
+    preview_peers = [(row["name"], row["public_key"], row["assigned_ip"], bool(row["disabled"])) for row in existing_rows]
+    preview_peers.append((name, public_key, assigned_ip, False))
+    server_config_preview = render_config_with_managed_keys(current_config, preview_peers, managed_keys | {public_key})
     apply_config_with_helper(settings.helper_path, settings.run_dir, server_config_preview, payload.dry_run, interface)
 
     if payload.dry_run:
@@ -424,6 +564,7 @@ def create_peer(
             "interface_name": interface,
         }
     else:
+        db.execute("DELETE FROM deleted_peers WHERE interface_name = ? AND public_key = ?", (interface, public_key))
         db.execute(
             """
         INSERT INTO peers (name, notes, public_key, assigned_ip, created_at, disabled, expires_at, managed, tunnel_mode, client_allowed_ips, client_dns, interface_name)
@@ -475,7 +616,7 @@ def create_peer(
         ),
         client_config=client_config,
         qr_png_data_uri=qr,
-        server_config_preview=server_config_preview,
+        server_config_preview=redact_text(server_config_preview),
         dry_run=payload.dry_run,
     )
 
@@ -486,7 +627,11 @@ def apply_db_config(settings: Settings, db: sqlite3.Connection, dry_run: bool = 
         (interface,),
     ).fetchall()
     peers = [(row["name"], row["public_key"], row["assigned_ip"], bool(row["disabled"])) for row in rows]
-    next_config = render_config_with_active_peers(read_current_config(interface, settings), peers)
+    next_config = render_config_with_managed_keys(
+        read_current_config(interface, settings),
+        peers,
+        managed_public_keys_for_interface(db, interface),
+    )
     apply_config_with_helper(settings.helper_path, settings.run_dir, next_config, dry_run, interface)
     return next_config
 
@@ -576,6 +721,7 @@ def take_ownership(
             interface,
         ),
     )
+    db.execute("DELETE FROM deleted_peers WHERE interface_name = ? AND public_key = ?", (interface, public_key))
     db.commit()
     return row_to_peer(db.execute("SELECT * FROM peers WHERE public_key = ?", (public_key,)).fetchone())
 
@@ -612,12 +758,24 @@ def delete_peer(
     settings: Settings = Depends(get_settings),
     db: sqlite3.Connection = Depends(get_db),
 ) -> dict[str, bool]:
-    row = db.execute("SELECT * FROM peers WHERE id = ? AND interface_name = ?", (peer_id, interface)).fetchone()
+    row = db.execute("SELECT * FROM peers WHERE id = ? AND managed = 1 AND interface_name = ?", (peer_id, interface)).fetchone()
     if not row:
-        raise HTTPException(status_code=404, detail="Peer not found")
-    db.execute("DELETE FROM peers WHERE id = ?", (peer_id,))
-    apply_db_config(settings, db, interface=interface)
-    db.commit()
+        raise HTTPException(status_code=404, detail="Managed peer not found")
+    try:
+        db.execute(
+            """
+            INSERT INTO deleted_peers (interface_name, public_key, deleted_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(interface_name, public_key) DO UPDATE SET deleted_at = excluded.deleted_at
+            """,
+            (interface, row["public_key"], utcnow().isoformat()),
+        )
+        db.execute("DELETE FROM peers WHERE id = ?", (peer_id,))
+        apply_db_config(settings, db, interface=interface)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     return {"ok": True}
 
 
@@ -628,8 +786,9 @@ def config_diff(
     settings: Settings = Depends(get_settings),
     db: sqlite3.Connection = Depends(get_db),
 ) -> dict[str, str]:
-    current = read_current_config(interface, settings)
+    current = redact_text(read_current_config(interface, settings))
     candidate = apply_db_config(settings, db, dry_run=True, interface=interface)
+    candidate = redact_text(candidate)
     diff = "\n".join(
         difflib.unified_diff(
             current.splitlines(),
@@ -640,6 +799,65 @@ def config_diff(
         )
     )
     return {"diff": diff}
+
+
+@app.get("/api/backups", dependencies=[Depends(require_auth)])
+def list_backups(
+    interface: str = Depends(get_interface_from_request),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, list[dict[str, object]]]:
+    settings.backup_dir.mkdir(parents=True, exist_ok=True)
+    backups = []
+    for path in sorted(settings.backup_dir.glob(f"{interface}.conf.*.bak"), reverse=True):
+        if not path.is_file():
+            continue
+        stat = path.stat()
+        timestamp = path.name.removeprefix(f"{interface}.conf.").removesuffix(".bak")
+        backups.append(
+            {
+                "name": path.name,
+                "interface": interface,
+                "timestamp": timestamp,
+                "size": stat.st_size,
+            }
+        )
+    return {"backups": backups}
+
+
+@app.get("/api/backups/{backup_name}/diff", dependencies=[Depends(require_auth)])
+def backup_diff(
+    backup_name: str,
+    interface: str = Depends(get_interface_from_request),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    backup_path = backup_path_from_name(settings, interface, backup_name)
+    current = redact_private_keys(read_current_config(interface, settings))
+    backup = redact_private_keys(backup_path.read_text(encoding="utf-8"))
+    diff = "\n".join(
+        difflib.unified_diff(
+            current.splitlines(),
+            backup.splitlines(),
+            fromfile=f"current {interface}.conf",
+            tofile=backup_name,
+            lineterm="",
+        )
+    )
+    return {"diff": diff}
+
+
+@app.post("/api/backups/{backup_name}/restore", dependencies=[Depends(require_auth)])
+def restore_backup(
+    backup_name: str,
+    payload: RestoreBackupRequest,
+    interface: str = Depends(get_interface_from_request),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    expected = f"RESTORE {interface}"
+    if payload.confirmation != expected:
+        raise HTTPException(status_code=422, detail=f'Type "{expected}" to restore this backup')
+    backup_path = backup_path_from_name(settings, interface, backup_name)
+    restore_backup_with_helper(settings.helper_path, interface, backup_path)
+    return {"detail": "Backup restored"}
 
 
 @app.post("/api/maintenance/expire", dependencies=[Depends(require_auth)])

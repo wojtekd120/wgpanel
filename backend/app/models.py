@@ -94,6 +94,7 @@ class WgPeerStatus(BaseModel):
     transfer_rx: int
     transfer_tx: int
     persistent_keepalive: str
+    activity_status: str = "Never connected"
 
 
 class Dashboard(BaseModel):
@@ -102,6 +103,14 @@ class Dashboard(BaseModel):
     peers: list[WgPeerStatus]
     client_address_pool: str = ""
     server_address: str = ""
+
+
+class OnboardingCheck(BaseModel):
+    key: str
+    label: str
+    state: str
+    detail: str
+    fix: str = ""
 
 
 class ConfigDiffRequest(BaseModel):
@@ -137,3 +146,7 @@ class SetupRequest(BaseModel):
     username: str = Field(default="admin", min_length=1, max_length=64)
     password: str = Field(min_length=12, max_length=256)
     confirm_password: str = Field(min_length=12, max_length=256)
+
+
+class RestoreBackupRequest(BaseModel):
+    confirmation: str = Field(min_length=1, max_length=128)

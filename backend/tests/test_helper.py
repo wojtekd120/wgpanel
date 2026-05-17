@@ -52,3 +52,15 @@ def test_helper_rejects_invalid_interface_names():
     for name in ["../wg0", "/etc/passwd", "wg0;rm -rf", "bad/name"]:
         with pytest.raises(SystemExit):
             helper.validate_interface(name)
+
+
+def test_helper_rejects_backup_outside_backup_dir(tmp_path, monkeypatch):
+    helper = load_helper()
+    backup_dir = tmp_path / "etc" / "wireguard" / "backups"
+    backup_dir.mkdir(parents=True)
+    outside = tmp_path / "wg0.conf.20260101-120000.bak"
+    outside.write_text("[Interface]\n", encoding="utf-8")
+    monkeypatch.setattr(helper, "BACKUP_DIR", backup_dir)
+
+    with pytest.raises(SystemExit):
+        helper.validate_backup_path(str(outside), "wg0")

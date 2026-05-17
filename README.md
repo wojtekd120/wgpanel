@@ -41,7 +41,7 @@ sudo apt update
 sudo apt install -y git docker.io docker-compose wireguard wireguard-tools
 sudo systemctl enable --now docker
 
-git clone https://github.com/<OWNER>/wgpanel.git
+git clone https://github.com/wojtekd120/wgpanel.git
 cd wgpanel
 
 cp .env.example .env
@@ -124,6 +124,12 @@ docker-compose run --rm wgpanel hash-password
 5. Save the generated config or QR code immediately.
 
 The private key is shown only once and cannot be recovered later.
+
+The dashboard includes an onboarding checklist with pass/warn/fail checks and fix commands for common host setup issues. It also works on phone-sized screens with stacked cards and wrapped keys/config blocks.
+
+For cautious changes, use **Preview changes** under the new-client form. It shows generated config output without modifying `/etc/wireguard/<interface>.conf` and without running `wg syncconf`.
+
+Mobile UI manual check: open browser devtools at `360px`, `390px`, `430px`, `768px`, and desktop widths. The dashboard cards should stack, peer rows should become cards, forms should be single-column, and QR/config blocks should stay inside the viewport.
 
 ## Existing WireGuard Server Safety
 
@@ -212,6 +218,10 @@ Put WGPanel behind HTTPS with Caddy or Nginx. Do not expose plain HTTP to the in
 `wg0` is the default. WGPanel discovers interfaces from `wg show interfaces` and `/etc/wireguard/*.conf`. Use the top-bar selector to switch interfaces. Supported names include `wg0`, `wg1`, `wg-test`, `homevpn`, and `wg.prod`.
 
 WGPanel never accepts arbitrary config paths from the UI.
+
+## License
+
+WGPanel is released under the [MIT License](LICENSE).
 
 ## Advanced Docs
 
