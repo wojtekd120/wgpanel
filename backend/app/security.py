@@ -38,6 +38,10 @@ def new_session_token() -> str:
     return secrets.token_urlsafe(48)
 
 
+def new_setup_token() -> str:
+    return secrets.token_urlsafe(48)
+
+
 def token_digest(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
@@ -48,3 +52,7 @@ def utcnow() -> datetime:
 
 def session_expiry() -> datetime:
     return utcnow() + timedelta(hours=12)
+
+
+def setup_expiry() -> datetime:
+    return utcnow() + timedelta(minutes=30)

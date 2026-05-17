@@ -47,6 +47,8 @@ RUN chmod 0750 /usr/local/sbin/wgpanel-helper \
     && chmod 0440 /etc/sudoers.d/wgpanel \
     && visudo -cf /etc/sudoers.d/wgpanel \
     && chmod 0755 /usr/local/bin/docker-entrypoint.sh \
+    && chmod 0755 /app/backend/scripts/wgpanel_admin.py \
+    && ln -s /app/backend/scripts/wgpanel_admin.py /usr/local/bin/wgpanel-admin \
     && mkdir -p /var/lib/wgpanel /run/wgpanel \
     && chown -R wgpanel:wgpanel /var/lib/wgpanel /run/wgpanel /app
 

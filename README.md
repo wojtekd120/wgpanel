@@ -1,257 +1,221 @@
 # WGPanel
 
-**Version:** `0.1.1-beta`
-> Status: beta / testing version.
+**Version:** `0.1.3-beta`
 
-Self-hosted WireGuard admin panel for Ubuntu/Debian.
+WGPanel is a self-hosted web UI for managing WireGuard peers.
 
-## Stack
+**Beta warning:** This is beta software. Test on a VM or backup your WireGuard config before using on an important server.
 
-- FastAPI backend
-- React + Vite + Tailwind frontend
-- SQLite metadata store
-- WireGuard interface `wg0`
-- WireGuard config `/etc/wireguard/wg0.conf`
+WGPanel is designed to preserve existing WireGuard peers. Existing peers are shown as unmanaged until imported or taken over. WGPanel should only modify peers it manages. See [README_EXISTING_WIREGUARD.md](README_EXISTING_WIREGUARD.md).
 
-## Security model
+## What WGPanel Does
 
-The backend must run as an unprivileged `wgpanel` user. It never runs arbitrary shell commands and all subprocess calls use argv arrays. The backend can read `/etc/wireguard/wg0.conf`, generate a complete candidate config under `/run/wgpanel`, then call only:
+- Shows WireGuard interface status, latest handshakes, RX/TX, and peers.
+- Creates WireGuard client peers and allocates the next free VPN IP.
+- Shows generated client config and QR code once.
+- Enables, disables, deletes, and edits metadata for managed peers.
+- Preserves unmanaged existing peers.
+- Supports multiple interfaces such as `wg0`, `wg1`, `wg-test`, `homevpn`.
+- Creates backups before applying config changes.
 
-```bash
-sudo /usr/local/sbin/wgpanel-helper apply --config /run/wgpanel/<file>.conf
-```
+## What WGPanel Does Not Do
 
-The helper is root-owned and validates that config paths are under `/run/wgpanel` before calling `wg-quick strip` and `wg syncconf wg0`. Private client keys are returned once in the create response and are not stored in SQLite.
+- It does not store generated client private keys.
+- It does not expose the server private key.
+- It does not manage arbitrary config paths from the UI.
+- It does not provide speed/data limits. WireGuard has no native per-peer speed/data limit; future support would require `tc`/`nftables`.
+- It is not a replacement for host WireGuard installation.
 
-## Local development
+## Requirements
 
-Backend:
+- Debian/Ubuntu server
+- Docker and Docker Compose
+- WireGuard already installed on the host
+- A working host interface, usually `wg0`
+- Existing config at `/etc/wireguard/wg0.conf`
 
-```bash
-cd backend
-python3 -m venv .venv
-. .venv/bin/activate
-pip install -r requirements.txt
-WGPANEL_SECURE_COOKIES=false uvicorn app.main:app --reload
-```
-
-Frontend:
-
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
-## Generate admin password hash
+## Quick Start: Docker Compose
 
 ```bash
-cd backend
-. .venv/bin/activate
-python scripts/hash_password.py
-```
+sudo apt update
+sudo apt install -y git docker.io docker-compose wireguard wireguard-tools
+sudo systemctl enable --now docker
 
-Put the printed value in `/etc/wgpanel/wgpanel.env` as `WGPANEL_ADMIN_PASSWORD_HASH`.
+git clone https://github.com/<OWNER>/wgpanel.git
+cd wgpanel
 
-## Production install
-
-### Docker Compose
-
-This is the recommended production path when you want WGPanel containerized while still managing the host WireGuard interface. The Compose service uses `network_mode: host`, `cap_add: NET_ADMIN`, and `/dev/net/tun` so `wg show wg0 dump`, `wg-quick strip`, and `wg syncconf wg0` operate against the host network namespace. It does not add `SYS_MODULE` by default.
-
-Install Docker Engine, Docker Compose V2, and WireGuard on the Ubuntu/Debian host first. The host should already be able to run `sudo wg show wg0` before WGPanel starts.
-
-Run this preflight on the host:
-
-```bash
-docker compose version
-test -c /dev/net/tun
-sudo test -f /etc/wireguard/wg0.conf
-sudo wg show wg0
-```
-
-Then create `.env`:
-
-```bash
 cp .env.example .env
 ```
 
-Set at least these values:
+Edit `.env`. Minimum values:
 
 ```dotenv
-WGPANEL_SERVER_ENDPOINT=vpn.example.com:51820
-WGPANEL_SERVER_PUBLIC_KEY=your_server_public_key
-WGPANEL_ADMIN_PASSWORD_HASH=your_password_hash
+WGPANEL_INTERFACE=wg0
+WGPANEL_WG_CONFIG=/etc/wireguard/wg0.conf
+WGPANEL_SERVER_ENDPOINT=YOUR_SERVER_IP_OR_DOMAIN:51820
+WGPANEL_SERVER_PUBLIC_KEY=YOUR_SERVER_PUBLIC_KEY
+WGPANEL_SECURE_COOKIES=false
 ```
 
-Generate the password hash without keeping the password in shell history:
+Use `WGPANEL_SECURE_COOKIES=false` for local HTTP testing. Use `WGPANEL_SECURE_COOKIES=true` behind HTTPS in production.
+
+Back up your config before first start:
 
 ```bash
-docker compose build wgpanel
-docker compose run --rm --entrypoint python wgpanel scripts/hash_password.py
+sudo mkdir -p /root/wgpanel-backups
+sudo cp /etc/wireguard/wg0.conf /root/wgpanel-backups/wg0.conf.before-wgpanel.$(date +%Y%m%d-%H%M%S)
 ```
 
-With the legacy Compose binary, use the same command shape:
+Run preflight checks:
 
 ```bash
-docker-compose run --rm --entrypoint python wgpanel scripts/hash_password.py
+./scripts/preflight.sh
 ```
 
-Build and start WGPanel:
+Start WGPanel:
 
 ```bash
-docker compose build
-docker compose up -d --build
+docker-compose up -d --build
+docker-compose logs -f wgpanel
 ```
 
-Watch startup logs:
+Open:
+
+```text
+http://SERVER_IP:8080
+```
+
+On first run, WGPanel prints a setup URL in the logs. Open it and create the admin account. Beginners do not need to manually generate a password hash.
+
+## First Login
+
+If setup mode is active, get the token with:
 
 ```bash
-docker compose logs -f
+docker-compose logs wgpanel
+docker-compose exec wgpanel cat /var/lib/wgpanel/setup-token
 ```
 
-Check WireGuard visibility from the running container:
+Reset an admin password from the server shell:
 
 ```bash
-docker compose exec wgpanel wg show wg0
+docker-compose exec wgpanel wgpanel-admin reset-password
 ```
 
-The app listens on `127.0.0.1:8080` by default through host networking. Put it behind HTTPS with Nginx or Caddy and keep `WGPANEL_SECURE_COOKIES=true`.
-
-The Compose file stores SQLite data in the `wgpanel-data` Docker volume, bind mounts host `/etc/wireguard` read/write, and uses a tmpfs at `/run/wgpanel` for generated candidate configs. The container does not use `privileged: true`. The image grants `cap_net_admin` only to `/usr/bin/wg` so the unprivileged FastAPI process can read `wg show wg0 dump`; config application still goes through the sudo-limited helper.
-
-On startup, the container ensures `/etc/wireguard` exists, sets it to `root:wgpanel` with mode `0750`, and if `/etc/wireguard/wg0.conf` exists sets it to `root:wgpanel` with mode `0640`. Do not use `0644` for `wg0.conf`; it contains the server private key. After applying a new config, the helper keeps `/etc/wireguard/wg0.conf` root-owned with group `wgpanel` and mode `0640`.
-
-Useful verification commands:
+If the setup token expired:
 
 ```bash
-cp .env.example .env
-docker compose build
-docker compose run --rm --entrypoint python wgpanel scripts/hash_password.py
-docker compose up -d
-docker compose logs -f
-docker compose exec wgpanel wg show wg0
-docker compose exec wgpanel wg show wg0 dump
-docker compose exec wgpanel sudo /usr/local/sbin/wgpanel-helper --help
+docker-compose exec wgpanel wgpanel-admin create-setup-token
 ```
 
-### Docker troubleshooting
-
-If `/dev/net/tun` is missing, load the kernel module and confirm the device exists:
+Advanced password hash generation is still available:
 
 ```bash
-sudo modprobe tun
-ls -l /dev/net/tun
+docker-compose run --rm wgpanel hash-password
+./scripts/generate-admin-password.sh
 ```
 
-Do this on the host whenever possible. Do not add `SYS_MODULE` to the container by default. Only use `SYS_MODULE` as an exceptional fallback on tightly controlled systems where you intentionally need the container to load kernel modules, and remove it again after fixing host WireGuard availability.
+## Add Your First Client
 
-If WireGuard commands fail with an operation-not-permitted error, confirm the Compose service has `cap_add: NET_ADMIN` and was recreated after changes:
+1. Log in.
+2. Choose the WireGuard interface in the top bar.
+3. Click New Client.
+4. Choose split tunnel, full tunnel, or custom AllowedIPs.
+5. Save the generated config or QR code immediately.
+
+The private key is shown only once and cannot be recovered later.
+
+## Existing WireGuard Server Safety
+
+WGPanel reads the current `/etc/wireguard/<interface>.conf` before every apply. It preserves unmanaged peer blocks, comments, `PostUp`, `PostDown`, routes, and interface settings. WGPanel never accepts arbitrary config paths from the UI; interface `wg1` maps only to `/etc/wireguard/wg1.conf`.
+
+## Backup And Restore Basics
+
+WGPanel also creates timestamped backups under `/etc/wireguard/backups` before real applies.
+
+Manual restore:
 
 ```bash
-docker compose up -d --force-recreate
-docker compose exec wgpanel wg show wg0
+sudo cp /root/wgpanel-backups/<backup-file> /etc/wireguard/wg0.conf
+sudo systemctl restart wg-quick@wg0
 ```
 
-If `wg0` does not exist, bring up the host interface before starting WGPanel:
+WGPanel backup restore:
 
 ```bash
-sudo apt-get update
-sudo apt-get install wireguard wireguard-tools
-sudo systemctl enable --now wg-quick@wg0
-sudo wg show wg0
+sudo cp /etc/wireguard/backups/<backup-file> /etc/wireguard/wg0.conf
+sudo systemctl restart wg-quick@wg0
 ```
 
-If login succeeds but the browser does not keep the session behind a reverse proxy, make sure the public site is HTTPS when `WGPANEL_SECURE_COOKIES=true`. For plain local HTTP testing only, set:
+## Troubleshooting
+
+**Cannot connect to Docker daemon**
+
+```bash
+sudo systemctl enable --now docker
+sudo usermod -aG docker $USER
+```
+
+Log out and log back in.
+
+**docker-compose build cannot reach deb.debian.org**
+
+The Compose file uses `build.network: host`. Check VM internet/NAT and DNS.
+
+**Permission denied: /etc/wireguard/wg0.conf**
+
+Expected permissions:
+
+```text
+/etc/wireguard root:wgpanel 750
+/etc/wireguard/wg0.conf root:wgpanel 640
+```
+
+The Docker entrypoint should fix this. Never use `chmod 644` because `wg0.conf` contains the server private key.
+
+**No module named app**
+
+Use the supported command:
+
+```bash
+docker-compose run --rm wgpanel hash-password
+```
+
+**I cannot open the panel**
+
+WGPanel uses host networking. Open `http://SERVER_IP:8080`, check firewall rules, or use an SSH tunnel:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 user@server
+```
+
+## Easy Test Mode
+
+For local HTTP testing:
 
 ```dotenv
 WGPANEL_SECURE_COOKIES=false
 ```
 
-### Systemd without Docker
+No reverse proxy is required. Use `http://SERVER_IP:8080`.
 
-```bash
-sudo adduser --system --group --home /var/lib/wgpanel wgpanel
-sudo mkdir -p /opt/wgpanel /etc/wgpanel /var/lib/wgpanel /run/wgpanel
-sudo chown wgpanel:wgpanel /var/lib/wgpanel /run/wgpanel
-sudo chmod 750 /var/lib/wgpanel /run/wgpanel
+For production:
+
+```dotenv
+WGPANEL_SECURE_COOKIES=true
 ```
 
-Copy this repository to `/opt/wgpanel`, then install backend dependencies:
+Put WGPanel behind HTTPS with Caddy or Nginx. Do not expose plain HTTP to the internet.
 
-```bash
-cd /opt/wgpanel/backend
-sudo -u wgpanel python3 -m venv .venv
-sudo -u wgpanel .venv/bin/pip install -r requirements.txt
-```
+## Changing WireGuard Interface
 
-Build the frontend:
+`wg0` is the default. WGPanel discovers interfaces from `wg show interfaces` and `/etc/wireguard/*.conf`. Use the top-bar selector to switch interfaces. Supported names include `wg0`, `wg1`, `wg-test`, `homevpn`, and `wg.prod`.
 
-```bash
-cd /opt/wgpanel/frontend
-npm install
-npm run build
-```
+WGPanel never accepts arbitrary config paths from the UI.
 
-Install the helper:
+## Advanced Docs
 
-```bash
-sudo install -o root -g root -m 0750 helper/wgpanel-helper /usr/local/sbin/wgpanel-helper
-```
-
-Install sudoers:
-
-```bash
-sudo cp backend/apply_sudoers.example /etc/sudoers.d/wgpanel
-sudo chmod 0440 /etc/sudoers.d/wgpanel
-sudo visudo -cf /etc/sudoers.d/wgpanel
-```
-
-Create `/etc/wgpanel/wgpanel.env` from `deploy/wgpanel.env.example`, then set the real endpoint, server public key, and password hash.
-
-Install and start systemd service:
-
-```bash
-sudo cp deploy/wgpanel.service /etc/systemd/system/wgpanel.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now wgpanel
-```
-
-Serve `127.0.0.1:8080` behind Nginx/Caddy with HTTPS. Keep `WGPANEL_SECURE_COOKIES=true` in production.
-
-## API behavior
-
-- `GET /healthz` returns a simple unauthenticated health response for container and reverse-proxy checks.
-- Dashboard reads live status from `wg show wg0 dump`.
-- Peer metadata is stored in SQLite: name, notes, public key, assigned IP, created time, disabled flag, optional expiry.
-- New clients receive the next free IP from `10.8.0.0/24`, skipping `10.8.0.1`.
-- Peer names, WireGuard keys, IPs, and CIDRs are validated. Names containing shell metacharacters are rejected.
-- Dry-run peer creation renders the server/client config and QR code but does not persist metadata or apply WireGuard changes.
-- Client private keys are shown only once after peer creation and are not stored.
-
-## Future work
-
-- Bandwidth limiting is not supported in this beta. WireGuard does not provide native per-peer bandwidth limits; this requires `tc`/`nftables` integration.
-
-## Deploy an update on Docker
-
-On the Debian Docker test VM:
-
-```bash
-cd /opt/wgpanel
-git pull
-docker compose build --no-cache wgpanel
-docker compose up -d
-docker compose logs -f
-docker compose exec wgpanel wg show wg0
-```
-
-If you use the legacy Compose binary, replace `docker compose` with `docker-compose`.
-
-## Tests
-
-```bash
-cd backend
-. .venv/bin/activate
-pytest
-```
+- [README_EXISTING_WIREGUARD.md](README_EXISTING_WIREGUARD.md)
+- [SECURITY.md](SECURITY.md)
+- [ADVANCED_INSTALL.md](ADVANCED_INSTALL.md)
+- [CHANGELOG.md](CHANGELOG.md)

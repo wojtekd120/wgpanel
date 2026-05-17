@@ -1,9 +1,12 @@
 import ipaddress
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 from .validators import validate_cidr, validate_wg_key
+
+INTERFACE_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
 
 
 @dataclass(frozen=True)
@@ -18,7 +21,25 @@ class WgDumpPeer:
     persistent_keepalive: str
 
 
+@dataclass(frozen=True)
+class ConfigPeerBlock:
+    text: str
+    public_key: str | None
+    allowed_ips: list[str]
+
+
+def validate_interface_name(name: str) -> str:
+    if not INTERFACE_RE.fullmatch(name):
+        raise ValueError("Invalid WireGuard interface name")
+    return name
+
+
+def config_path_for_interface(interface: str) -> Path:
+    return Path("/etc/wireguard") / f"{validate_interface_name(interface)}.conf"
+
+
 def run_wg_dump(interface: str) -> str:
+    validate_interface_name(interface)
     result = subprocess.run(
         ["wg", "show", interface, "dump"],
         check=True,
@@ -27,6 +48,17 @@ def run_wg_dump(interface: str) -> str:
         timeout=10,
     )
     return result.stdout
+
+
+def run_wg_interfaces() -> list[str]:
+    result = subprocess.run(
+        ["wg", "show", "interfaces"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return [validate_interface_name(item) for item in result.stdout.split() if item.strip()]
 
 
 def parse_wg_dump(dump: str) -> list[WgDumpPeer]:
@@ -74,13 +106,16 @@ def generate_keypair() -> tuple[str, str]:
     return private, public
 
 
-def allocate_next_ip(network_cidr: str, used_ips: set[str]) -> str:
+def allocate_next_ip(network_cidr: str, used_ips: set[str], server_address: str | None = None) -> str:
     network = ipaddress.ip_network(validate_cidr(network_cidr))
+    server_ip = ipaddress.ip_address(server_address) if server_address else None
+    if server_ip and server_ip not in network:
+        raise ValueError("Server address must belong to the client address pool")
     reserved = {str(network.network_address), str(network.broadcast_address)}
+    if server_ip:
+        reserved.add(str(server_ip))
     for ip in network.hosts():
         ip_s = str(ip)
-        if ip_s.endswith(".1"):
-            continue
         if ip_s not in used_ips and ip_s not in reserved:
             return ip_s
     raise ValueError("No free IP addresses available")
@@ -101,6 +136,46 @@ def append_peer_to_config(base_config: str, peer_block: str) -> str:
     return base_config.rstrip() + "\n" + peer_block.lstrip()
 
 
+def parse_config_peer_blocks(config_text: str) -> list[ConfigPeerBlock]:
+    lines = config_text.splitlines()
+    blocks: list[ConfigPeerBlock] = []
+    index = 0
+    while index < len(lines):
+        if lines[index].strip() != "[Peer]":
+            index += 1
+            continue
+        start = index
+        index += 1
+        public_key: str | None = None
+        allowed_ips: list[str] = []
+        while index < len(lines) and not lines[index].strip().startswith("["):
+            line = lines[index].strip()
+            if "=" in line and not line.startswith("#"):
+                key, value = [part.strip() for part in line.split("=", 1)]
+                if key.lower() == "publickey":
+                    public_key = value
+                elif key.lower() == "allowedips":
+                    allowed_ips = [item.strip() for item in value.split(",") if item.strip()]
+            index += 1
+        blocks.append(ConfigPeerBlock("\n".join(lines[start:index]).rstrip() + "\n", public_key, allowed_ips))
+    return blocks
+
+
+def unmanaged_used_ips(config_text: str, managed_public_keys: set[str]) -> set[str]:
+    used: set[str] = set()
+    for block in parse_config_peer_blocks(config_text):
+        if block.public_key and block.public_key in managed_public_keys:
+            continue
+        for allowed in block.allowed_ips:
+            try:
+                network = ipaddress.ip_network(allowed, strict=False)
+            except ValueError:
+                continue
+            if network.prefixlen in (32, 128):
+                used.add(str(network.network_address))
+    return used
+
+
 def strip_wgpanel_peer_blocks(config_text: str) -> str:
     lines = config_text.splitlines()
     kept: list[str] = []
@@ -119,13 +194,41 @@ def strip_wgpanel_peer_blocks(config_text: str) -> str:
 
 
 def render_config_with_active_peers(base_config: str, peers: list[tuple[str, str, str, bool]]) -> str:
-    stripped = strip_wgpanel_peer_blocks(base_config)
+    managed_keys = {public_key for _, public_key, _, _ in peers}
+    stripped = strip_managed_peer_blocks(base_config, managed_keys)
     active_blocks = [
         render_server_peer_block(name, public_key, assigned_ip)
         for name, public_key, assigned_ip, disabled in peers
         if not disabled
     ]
     return stripped.rstrip() + "\n\n" + "\n".join(block.lstrip() for block in active_blocks)
+
+
+def strip_managed_peer_blocks(config_text: str, managed_public_keys: set[str]) -> str:
+    lines = config_text.splitlines()
+    kept: list[str] = []
+    index = 0
+    while index < len(lines):
+        if lines[index].strip() == "[Peer]":
+            start = index
+            index += 1
+            public_key: str | None = None
+            while index < len(lines) and not lines[index].strip().startswith("["):
+                line = lines[index].strip()
+                if "=" in line and not line.startswith("#"):
+                    key, value = [part.strip() for part in line.split("=", 1)]
+                    if key.lower() == "publickey":
+                        public_key = value
+                index += 1
+            if public_key in managed_public_keys:
+                while kept and kept[-1].startswith("# wgpanel peer: "):
+                    kept.pop()
+                continue
+            kept.extend(lines[start:index])
+            continue
+        kept.append(lines[index])
+        index += 1
+    return "\n".join(kept).rstrip() + "\n"
 
 
 def render_client_config(
@@ -149,6 +252,18 @@ def render_client_config(
         f"AllowedIPs = {allowed_ips}\n"
         "PersistentKeepalive = 25\n"
     )
+
+
+def validate_allowed_ips(value: str) -> str:
+    parts = [part.strip() for part in value.split(",") if part.strip()]
+    if not parts:
+        raise ValueError("Custom AllowedIPs must include at least one CIDR")
+    for part in parts:
+        try:
+            ipaddress.ip_network(part, strict=True)
+        except ValueError as exc:
+            raise ValueError("Invalid AllowedIPs CIDR") from exc
+    return ", ".join(parts)
 
 
 def read_config(path: Path) -> str:

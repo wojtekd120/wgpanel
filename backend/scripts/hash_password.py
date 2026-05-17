@@ -10,10 +10,16 @@ from app.security import hash_password
 
 
 def main() -> None:
-    password = getpass("Admin password: ")
-    confirmation = getpass("Confirm password: ")
+    if "--stdin" in sys.argv:
+        password = sys.stdin.readline().rstrip("\n")
+        confirmation = sys.stdin.readline().rstrip("\n")
+    else:
+        password = getpass("Admin password: ")
+        confirmation = getpass("Confirm password: ")
     if password != confirmation:
         raise SystemExit("Passwords do not match")
+    if len(password) < 12:
+        raise SystemExit("Password must be at least 12 characters")
     print(hash_password(password))
 
 

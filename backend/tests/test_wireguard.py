@@ -8,6 +8,8 @@ from app.wireguard import (
     render_config_with_active_peers,
     render_server_peer_block,
     strip_wgpanel_peer_blocks,
+    unmanaged_used_ips,
+    validate_allowed_ips,
 )
 
 
@@ -38,12 +40,12 @@ def test_parse_wg_dump_peers():
 def test_allocate_next_ip_skips_server_address_and_used_ips():
     used = {"10.8.0.2", "10.8.0.3"}
 
-    assert allocate_next_ip("10.8.0.0/24", used) == "10.8.0.4"
+    assert allocate_next_ip("10.8.0.0/24", used, "10.8.0.1") == "10.8.0.4"
 
 
 def test_allocate_next_ip_raises_when_full():
     with pytest.raises(ValueError):
-        allocate_next_ip("10.8.0.0/30", {"10.8.0.2"})
+        allocate_next_ip("10.8.0.0/30", {"10.8.0.2"}, "10.8.0.1")
 
 
 def test_peer_config_generation():
@@ -77,3 +79,57 @@ def test_render_config_with_active_peers_removes_managed_disabled_peer():
     assert KEY_B in rendered
     assert "wgpanel peer: disabled" not in rendered
     assert KEY_C not in rendered
+
+
+def test_unmanaged_peer_is_preserved_when_rendering_managed_config():
+    base = (
+        "[Interface]\nPrivateKey = server\nPostUp = iptables rule\n\n"
+        "[Peer]\n# existing phone\n"
+        f"PublicKey = {KEY_C}\nAllowedIPs = 10.8.0.9/32\n"
+    )
+
+    rendered = render_config_with_active_peers(base, [("managed", KEY_B, "10.8.0.2", False)])
+
+    assert "PostUp = iptables rule" in rendered
+    assert KEY_C in rendered
+    assert "AllowedIPs = 10.8.0.9/32" in rendered
+    assert KEY_B in rendered
+    assert "AllowedIPs = 10.8.0.2/32" in rendered
+
+
+def test_disable_removes_managed_peer_but_preserves_unmanaged_peer():
+    base = (
+        "[Interface]\nAddress = 10.8.0.1/24\n\n"
+        f"[Peer]\nPublicKey = {KEY_C}\nAllowedIPs = 10.8.0.9/32\n\n"
+        f"[Peer]\nPublicKey = {KEY_B}\nAllowedIPs = 10.8.0.2/32\n"
+    )
+
+    rendered = render_config_with_active_peers(base, [("managed", KEY_B, "10.8.0.2", True)])
+
+    assert KEY_C in rendered
+    assert KEY_B not in rendered
+
+
+def test_unmanaged_allowed_ips_are_considered_used():
+    base = f"[Interface]\n\n[Peer]\nPublicKey = {KEY_C}\nAllowedIPs = 10.8.0.5/32\n"
+
+    assert unmanaged_used_ips(base, {KEY_B}) == {"10.8.0.5"}
+
+
+def test_custom_address_pool_skips_server_and_used_ips():
+    assert allocate_next_ip("172.16.50.0/24", {"172.16.50.2"}, "172.16.50.1") == "172.16.50.3"
+
+
+def test_full_split_and_custom_client_allowed_ips_rendering():
+    split = render_client_config(KEY_C, "10.8.0.2", KEY_A, "vpn.example.com:51820", "1.1.1.1", "10.8.0.0/24")
+    full = render_client_config(KEY_C, "10.8.0.2", KEY_A, "vpn.example.com:51820", "1.1.1.1", "0.0.0.0/0, ::/0")
+    custom = validate_allowed_ips("10.8.0.0/24, 192.168.1.0/24")
+
+    assert "AllowedIPs = 10.8.0.0/24" in split
+    assert "AllowedIPs = 0.0.0.0/0, ::/0" in full
+    assert custom == "10.8.0.0/24, 192.168.1.0/24"
+
+
+def test_custom_allowed_ips_rejects_invalid_cidr():
+    with pytest.raises(ValueError):
+        validate_allowed_ips("not-a-cidr")

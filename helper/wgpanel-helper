@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import argparse
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 try:
@@ -12,9 +14,15 @@ try:
 except ImportError:
     grp = None
 
-INTERFACE = "wg0"
-CONFIG_PATH = Path("/etc/wireguard/wg0.conf")
+try:
+    import fcntl
+except ImportError:
+    fcntl = None
+
+INTERFACE_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
 RUN_DIR = Path("/run/wgpanel")
+BACKUP_DIR = Path("/etc/wireguard/backups")
+LOCK_PATH = Path("/run/wgpanel/apply.lock")
 
 
 def fail(message: str) -> None:
@@ -34,10 +42,29 @@ def validate_config_path(path_s: str) -> Path:
     return path
 
 
-def apply(config_path: Path) -> None:
+def validate_interface(name: str) -> str:
+    if not INTERFACE_RE.fullmatch(name):
+        fail("invalid interface name")
+    return name
+
+
+def config_path_for_interface(interface: str) -> Path:
+    return Path("/etc/wireguard") / f"{validate_interface(interface)}.conf"
+
+
+def apply(interface: str, config_path: Path) -> None:
     if os.geteuid() != 0:
         fail("helper must run as root")
 
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with LOCK_PATH.open("w", encoding="utf-8") as lock_handle:
+        if fcntl is not None:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        _apply_locked(validate_interface(interface), config_path)
+
+
+def _apply_locked(interface: str, config_path: Path) -> None:
+    target_config = config_path_for_interface(interface)
     with tempfile.NamedTemporaryFile("w", prefix="wgpanel.strip.", suffix=".conf", delete=False) as stripped:
         stripped_path = Path(stripped.name)
 
@@ -51,20 +78,29 @@ def apply(config_path: Path) -> None:
         ).stdout
         stripped_path.write_text(stripped_data, encoding="utf-8")
         os.chmod(stripped_path, 0o600)
+
+        BACKUP_DIR.mkdir(mode=0o750, parents=True, exist_ok=True)
+        if grp is not None:
+            os.chown(BACKUP_DIR, 0, grp.getgrnam("wgpanel").gr_gid)
+        if target_config.exists():
+            timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+            backup_path = BACKUP_DIR / f"{interface}.conf.{timestamp}.bak"
+            shutil.copy2(target_config, backup_path)
+            if grp is not None:
+                os.chown(backup_path, 0, grp.getgrnam("wgpanel").gr_gid)
+            os.chmod(backup_path, 0o640)
+
         subprocess.run(
-            ["wg", "syncconf", INTERFACE, str(stripped_path)],
+            ["wg", "syncconf", interface, str(stripped_path)],
             check=True,
             capture_output=True,
             text=True,
             timeout=15,
         )
-        backup_path = CONFIG_PATH.with_suffix(".conf.bak")
-        if CONFIG_PATH.exists():
-            shutil.copy2(CONFIG_PATH, backup_path)
-        shutil.copy2(config_path, CONFIG_PATH)
+        shutil.copy2(config_path, target_config)
         if grp is not None:
-            os.chown(CONFIG_PATH, 0, grp.getgrnam("wgpanel").gr_gid)
-        os.chmod(CONFIG_PATH, 0o640)
+            os.chown(target_config, 0, grp.getgrnam("wgpanel").gr_gid)
+        os.chmod(target_config, 0o640)
     finally:
         stripped_path.unlink(missing_ok=True)
 
@@ -73,11 +109,12 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Restricted WGPanel WireGuard helper")
     sub = parser.add_subparsers(dest="command", required=True)
     apply_parser = sub.add_parser("apply")
+    apply_parser.add_argument("--interface", required=True)
     apply_parser.add_argument("--config", required=True)
     args = parser.parse_args()
 
     if args.command == "apply":
-        apply(validate_config_path(args.config))
+        apply(args.interface, validate_config_path(args.config))
 
 
 if __name__ == "__main__":

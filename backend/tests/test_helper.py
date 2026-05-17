@@ -36,3 +36,19 @@ def test_helper_accepts_conf_inside_run_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(helper, "RUN_DIR", run_dir)
 
     assert helper.validate_config_path(str(config)) == config.resolve()
+
+
+def test_helper_backup_paths_are_persistent_and_private(tmp_path, monkeypatch):
+    helper = load_helper()
+    backup_dir = tmp_path / "etc" / "wireguard" / "backups"
+    monkeypatch.setattr(helper, "BACKUP_DIR", backup_dir)
+
+    assert str(helper.BACKUP_DIR).endswith("backups")
+    assert "/run" not in str(helper.BACKUP_DIR).replace("\\", "/")
+
+
+def test_helper_rejects_invalid_interface_names():
+    helper = load_helper()
+    for name in ["../wg0", "/etc/passwd", "wg0;rm -rf", "bad/name"]:
+        with pytest.raises(SystemExit):
+            helper.validate_interface(name)
