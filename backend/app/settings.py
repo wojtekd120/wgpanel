@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     database_path: Path = Field(default=Path("wgpanel.db"))
     interface: str = Field(default="wg0")
     wg_config_path: Path = Field(default=Path("/etc/wireguard/wg0.conf"), validation_alias=AliasChoices("WGPANEL_WG_CONFIG_PATH", "WGPANEL_WG_CONFIG"))
+    backup_dir: Path = Field(default=Path("/etc/wireguard/backups"))
     helper_path: Path = Field(default=Path("/usr/local/sbin/wgpanel-helper"))
     run_dir: Path = Field(default=Path("/run/wgpanel"))
     network_cidr: str = Field(default="10.8.0.0/24")

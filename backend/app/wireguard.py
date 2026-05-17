@@ -3,6 +3,7 @@ import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+from time import time
 
 from .validators import validate_cidr, validate_wg_key
 
@@ -193,8 +194,20 @@ def strip_wgpanel_peer_blocks(config_text: str) -> str:
     return "\n".join(kept).rstrip() + "\n"
 
 
-def render_config_with_active_peers(base_config: str, peers: list[tuple[str, str, str, bool]]) -> str:
-    managed_keys = {public_key for _, public_key, _, _ in peers}
+def render_config_with_active_peers(
+    base_config: str,
+    peers: list[tuple[str, str, str, bool]],
+    managed_public_keys: set[str] | None = None,
+) -> str:
+    return render_config_with_managed_keys(base_config, peers, managed_public_keys)
+
+
+def render_config_with_managed_keys(
+    base_config: str,
+    peers: list[tuple[str, str, str, bool]],
+    managed_public_keys: set[str] | None = None,
+) -> str:
+    managed_keys = set(managed_public_keys or set()) | {public_key for _, public_key, _, _ in peers}
     stripped = strip_managed_peer_blocks(base_config, managed_keys)
     active_blocks = [
         render_server_peer_block(name, public_key, assigned_ip)
@@ -202,6 +215,18 @@ def render_config_with_active_peers(base_config: str, peers: list[tuple[str, str
         if not disabled
     ]
     return stripped.rstrip() + "\n\n" + "\n".join(block.lstrip() for block in active_blocks)
+
+
+def handshake_activity_status(latest_handshake: int, now: int | None = None) -> str:
+    if not latest_handshake:
+        return "Never connected"
+    current = int(time()) if now is None else now
+    age = max(0, current - latest_handshake)
+    if age < 5 * 60:
+        return "Active"
+    if age < 7 * 24 * 60 * 60:
+        return "Recent"
+    return "Stale"
 
 
 def strip_managed_peer_blocks(config_text: str, managed_public_keys: set[str]) -> str:

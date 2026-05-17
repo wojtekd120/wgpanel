@@ -42,6 +42,18 @@ def validate_config_path(path_s: str) -> Path:
     return path
 
 
+def validate_backup_path(path_s: str, interface: str) -> Path:
+    path = Path(path_s).resolve()
+    backup_dir = BACKUP_DIR.resolve()
+    if path.parent != backup_dir:
+        fail("backup must be under /etc/wireguard/backups")
+    if not path.name.startswith(f"{validate_interface(interface)}.conf.") or not path.name.endswith(".bak"):
+        fail("backup filename does not match interface")
+    if not path.is_file():
+        fail("backup does not exist")
+    return path
+
+
 def validate_interface(name: str) -> str:
     if not INTERFACE_RE.fullmatch(name):
         fail("invalid interface name")
@@ -61,6 +73,16 @@ def apply(interface: str, config_path: Path) -> None:
         if fcntl is not None:
             fcntl.flock(lock_handle, fcntl.LOCK_EX)
         _apply_locked(validate_interface(interface), config_path)
+
+
+def restore(interface: str, backup_path: Path) -> None:
+    if os.geteuid() != 0:
+        fail("helper must run as root")
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with LOCK_PATH.open("w", encoding="utf-8") as lock_handle:
+        if fcntl is not None:
+            fcntl.flock(lock_handle, fcntl.LOCK_EX)
+        _apply_locked(validate_interface(interface), backup_path)
 
 
 def _apply_locked(interface: str, config_path: Path) -> None:
@@ -111,10 +133,15 @@ def main() -> None:
     apply_parser = sub.add_parser("apply")
     apply_parser.add_argument("--interface", required=True)
     apply_parser.add_argument("--config", required=True)
+    restore_parser = sub.add_parser("restore")
+    restore_parser.add_argument("--interface", required=True)
+    restore_parser.add_argument("--backup", required=True)
     args = parser.parse_args()
 
     if args.command == "apply":
         apply(args.interface, validate_config_path(args.config))
+    elif args.command == "restore":
+        restore(args.interface, validate_backup_path(args.backup, args.interface))
 
 
 if __name__ == "__main__":

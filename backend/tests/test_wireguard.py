@@ -3,6 +3,7 @@ import pytest
 from app.wireguard import (
     allocate_next_ip,
     append_peer_to_config,
+    handshake_activity_status,
     parse_wg_dump,
     render_client_config,
     render_config_with_active_peers,
@@ -133,3 +134,25 @@ def test_full_split_and_custom_client_allowed_ips_rendering():
 def test_custom_allowed_ips_rejects_invalid_cidr():
     with pytest.raises(ValueError):
         validate_allowed_ips("not-a-cidr")
+
+
+def test_activity_status_calculation():
+    now = 1_800_000_000
+
+    assert handshake_activity_status(0, now=now) == "Never connected"
+    assert handshake_activity_status(now - 60, now=now) == "Active"
+    assert handshake_activity_status(now - 3600, now=now) == "Recent"
+    assert handshake_activity_status(now - (8 * 24 * 3600), now=now) == "Stale"
+
+
+def test_deleted_managed_key_is_not_preserved_as_unmanaged():
+    base = (
+        "[Interface]\nAddress = 10.8.0.1/24\n\n"
+        f"[Peer]\nPublicKey = {KEY_C}\nAllowedIPs = 10.8.0.9/32\n\n"
+        f"[Peer]\nPublicKey = {KEY_B}\nAllowedIPs = 10.8.0.2/32\n"
+    )
+
+    rendered = render_config_with_active_peers(base, [], managed_public_keys={KEY_B})
+
+    assert KEY_B not in rendered
+    assert KEY_C in rendered
