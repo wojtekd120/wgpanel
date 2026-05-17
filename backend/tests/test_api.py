@@ -29,7 +29,15 @@ def api_client(tmp_path, monkeypatch):
         secure_cookies=False,
     )
 
-    monkeypatch.setattr(main, "generate_keypair", lambda: (KEY_C, KEY_B))
+    key_index = {"value": 0}
+
+    def fake_keypair():
+        key_index["value"] += 1
+        public = (chr(ord("B") + key_index["value"]) * 43) + "="
+        private = (chr(ord("K") + key_index["value"]) * 43) + "="
+        return private, public
+
+    monkeypatch.setattr(main, "generate_keypair", fake_keypair)
     monkeypatch.setattr(main, "apply_config_with_helper", lambda *args, **kwargs: str(tmp_path / "candidate.conf"))
     main.app.dependency_overrides[main.require_auth] = lambda: None
     main.app.dependency_overrides[get_settings] = lambda: settings
@@ -91,15 +99,17 @@ def test_disable_enable_toggle_changes_state(api_client):
 
     disabled = api_client.post(f"/api/peers/{peer_id}/disable")
     assert disabled.status_code == 200
-    assert disabled.json()["disabled"] is True
+    assert disabled.json()["detail"] == "Peer disabled"
+    assert disabled.json()["active"] is False
 
     enabled = api_client.post(f"/api/peers/{peer_id}/enable")
     assert enabled.status_code == 200
-    assert enabled.json()["disabled"] is False
+    assert enabled.json()["detail"] == "Peer enabled"
+    assert enabled.json()["active"] is True
 
     toggled = api_client.post(f"/api/peers/{peer_id}/toggle")
     assert toggled.status_code == 200
-    assert toggled.json()["disabled"] is True
+    assert toggled.json()["active"] is False
 
 
 def test_update_peer_metadata(api_client):
@@ -113,6 +123,37 @@ def test_update_peer_metadata(api_client):
     assert updated.status_code == 200
     assert updated.json()["name"] == "alice laptop"
     assert updated.json()["notes"] == "Issued to Alice"
+
+
+def test_existing_peer_list_does_not_return_private_config(api_client):
+    api_client.post("/api/peers", json={"name": "alice"})
+
+    response = api_client.get("/api/peers")
+
+    assert response.status_code == 200
+    assert "client_config" not in response.json()[0]
+
+
+def test_manual_expiry_disables_expired_managed_peers(api_client):
+    created = api_client.post("/api/peers", json={"name": "alice", "expires_at": "2020-01-01T00:00:00Z"}).json()["peer"]
+
+    expired = api_client.post("/api/maintenance/expire")
+
+    assert expired.status_code == 200
+    assert expired.json()["count"] == 1
+    assert created["id"] in expired.json()["peer_ids"]
+    peer = api_client.get("/api/peers").json()[0]
+    assert peer["disabled"] is True
+
+
+def test_invalid_custom_allowed_ips_is_readable(api_client):
+    response = api_client.post(
+        "/api/peers",
+        json={"name": "alice", "tunnel_mode": "custom", "custom_allowed_ips": "bad"},
+    )
+
+    assert response.status_code == 422
+    assert "AllowedIPs" in response.json()["detail"]
 
 
 def test_docker_entrypoint_permission_logic_is_documented():

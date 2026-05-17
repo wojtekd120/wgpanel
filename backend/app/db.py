@@ -10,11 +10,35 @@ CREATE TABLE IF NOT EXISTS peers (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     name TEXT NOT NULL,
     notes TEXT NOT NULL DEFAULT '',
-    public_key TEXT NOT NULL UNIQUE,
-    assigned_ip TEXT NOT NULL UNIQUE,
+    public_key TEXT NOT NULL,
+    assigned_ip TEXT NOT NULL,
     created_at TEXT NOT NULL,
     disabled INTEGER NOT NULL DEFAULT 0,
-    expires_at TEXT
+    expires_at TEXT,
+    managed INTEGER NOT NULL DEFAULT 1,
+    tunnel_mode TEXT NOT NULL DEFAULT 'split',
+    client_allowed_ips TEXT NOT NULL DEFAULT '',
+    client_dns TEXT NOT NULL DEFAULT '',
+    interface_name TEXT NOT NULL DEFAULT 'wg0'
+);
+
+CREATE TABLE IF NOT EXISTS admins (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS setup_tokens (
+    token_digest TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -24,6 +48,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_peers_disabled ON peers(disabled);
+CREATE INDEX IF NOT EXISTS idx_peers_interface ON peers(interface_name);
 CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions(expires_at);
 """
 
@@ -40,8 +65,17 @@ def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(peers)").fetchall()}
-        if "notes" not in columns:
-            conn.execute("ALTER TABLE peers ADD COLUMN notes TEXT NOT NULL DEFAULT ''")
+        migrations = {
+            "notes": "ALTER TABLE peers ADD COLUMN notes TEXT NOT NULL DEFAULT ''",
+            "managed": "ALTER TABLE peers ADD COLUMN managed INTEGER NOT NULL DEFAULT 1",
+            "tunnel_mode": "ALTER TABLE peers ADD COLUMN tunnel_mode TEXT NOT NULL DEFAULT 'split'",
+            "client_allowed_ips": "ALTER TABLE peers ADD COLUMN client_allowed_ips TEXT NOT NULL DEFAULT ''",
+            "client_dns": "ALTER TABLE peers ADD COLUMN client_dns TEXT NOT NULL DEFAULT ''",
+            "interface_name": f"ALTER TABLE peers ADD COLUMN interface_name TEXT NOT NULL DEFAULT '{get_settings().interface}'",
+        }
+        for column, statement in migrations.items():
+            if column not in columns:
+                conn.execute(statement)
         conn.commit()
 
 
