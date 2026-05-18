@@ -74,13 +74,12 @@ function Login({ onLogin }) {
   )
 }
 
-function Setup() {
-  const params = new URLSearchParams(window.location.search)
-  const [token, setToken] = useState(params.get('token') || '')
+function Setup({ disabled = false }) {
   const [username, setUsername] = useState('admin')
   const [password, setPassword] = useState('')
   const [confirm, setConfirm] = useState('')
   const [message, setMessage] = useState('')
+  const [done, setDone] = useState(false)
 
   const submit = async (event) => {
     event.preventDefault()
@@ -94,7 +93,8 @@ function Setup() {
       return
     }
     try {
-      await api('/setup', { method: 'POST', body: JSON.stringify({ token, username, password, confirm_password: confirm }) })
+      await api('/setup', { method: 'POST', body: JSON.stringify({ username, password, confirm_password: confirm }) })
+      setDone(true)
       setMessage('Setup complete. You can sign in now.')
     } catch (err) {
       setMessage(err.message || 'Setup failed')
@@ -105,13 +105,21 @@ function Setup() {
     <main className="auth-shell">
       <form className="login-panel" onSubmit={submit}>
         <h1>Set up WGPanel</h1>
-        <p className="muted">If your token expired, run docker-compose logs wgpanel or docker-compose exec wgpanel cat /var/lib/wgpanel/setup-token.</p>
-        <label><span>Setup token</span><input value={token} onChange={(event) => setToken(event.target.value)} /></label>
+        {disabled ? (
+          <>
+            <p className="banner">Setup is already completed.</p>
+            <button type="button" onClick={() => window.location.assign('/')}>Go to login</button>
+          </>
+        ) : (
+          <>
+        <p className="muted">Create the first admin account. WGPanel stores only a password hash, never the plain password.</p>
         <label><span>Admin username</span><input value={username} onChange={(event) => setUsername(event.target.value)} /></label>
         <label><span>Password</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
         <label><span>Confirm password</span><input type="password" value={confirm} onChange={(event) => setConfirm(event.target.value)} /></label>
         {message && <p className="banner">{message}</p>}
-        <button>Create admin</button>
+        {done ? <button type="button" onClick={() => window.location.assign('/')}>Go to login</button> : <button>Create admin</button>}
+          </>
+        )}
       </form>
     </main>
   )
@@ -127,6 +135,7 @@ function App() {
   const [banner, setBanner] = useState('')
   const [backups, setBackups] = useState([])
   const [onboarding, setOnboarding] = useState([])
+  const [page, setPage] = useState('dashboard')
   const [backupDiff, setBackupDiff] = useState('')
   const [restoreTarget, setRestoreTarget] = useState(null)
   const [restoreText, setRestoreText] = useState('')
@@ -142,7 +151,7 @@ function App() {
       const setup = await fetch('/api/setup/status').then((r) => r.json()).catch(() => ({ setup_required: false }))
       setSetupRequired(setup.setup_required)
       if (setup.setup_required) return
-      const [dash, peerRows, ifaceRows, selected, backupRows, onboardingRows] = await Promise.all([api('/dashboard'), api('/peers'), api('/interfaces'), api('/settings/interface'), api('/backups'), api('/onboarding')])
+      const [dash, peerRows, ifaceRows, selected, backupRows, onboardingRows] = await Promise.all([api('/dashboard'), api('/peers'), api('/interfaces'), api('/settings/interface'), api('/backups'), api('/diagnostics')])
       setDashboard(dash)
       setPeers(peerRows)
       setBackups(backupRows.backups || [])
@@ -240,6 +249,35 @@ function App() {
     await navigator.clipboard.writeText(publicKey)
     setBanner('Public key copied')
   }
+
+  const copyText = async (value) => {
+    await navigator.clipboard.writeText(value)
+    setBanner('Copied')
+  }
+
+  const createBackupNow = async () => {
+    try {
+      await api('/backups', { method: 'POST' })
+      setBanner('Backup created')
+      await load()
+    } catch (err) {
+      setBanner(err.message || 'Unable to create backup')
+    }
+  }
+
+  const diagnosticsSummary = useMemo(() => {
+    const counts = { pass: 0, warn: 0, fail: 0 }
+    onboarding.forEach((item) => { counts[item.state] = (counts[item.state] || 0) + 1 })
+    return counts
+  }, [onboarding])
+
+  const diagnosticsByGroup = useMemo(() => {
+    return onboarding.reduce((groups, item) => {
+      groups[item.group] = groups[item.group] || []
+      groups[item.group].push(item)
+      return groups
+    }, {})
+  }, [onboarding])
 
   const downloadConfig = () => {
     if (!result?.client_config) return
@@ -347,7 +385,8 @@ function App() {
     }
   }
 
-  if (setupRequired || window.location.pathname === '/setup') return <Setup />
+  if (setupRequired) return <Setup />
+  if (window.location.pathname === '/setup') return <Setup disabled />
   if (!authed) return <Login onLogin={load} />
 
   return (
@@ -369,27 +408,21 @@ function App() {
         </div>
       </header>
 
+      <nav className="tabs">
+        <button className={page === 'dashboard' ? 'active' : ''} onClick={() => setPage('dashboard')}>Dashboard</button>
+        <button className={page === 'diagnostics' ? 'active' : ''} onClick={() => setPage('diagnostics')}>Diagnostics</button>
+        <button className={page === 'backups' ? 'active' : ''} onClick={() => setPage('backups')}>Backups</button>
+      </nav>
+
       {banner && <div className="banner">{banner}</div>}
       <div className="notice">Existing unmanaged peers are preserved. WGPanel only modifies peers it manages.</div>
 
-      <section className="onboarding">
-        <div className="section-head">
-          <h2>Setup Checklist</h2>
-          <span>{currentInterface}</span>
-        </div>
-        <div className="checklist">
-          {onboarding.map((check) => (
-            <div className={`check-card ${check.state}`} key={check.key}>
-              <div>
-                <span className={`badge ${check.state}`}>{check.state}</span>
-                <strong>{check.label}</strong>
-              </div>
-              <p>{check.detail}</p>
-              {check.fix && <code>{check.fix}</code>}
-            </div>
-          ))}
-        </div>
-      </section>
+      {page === 'dashboard' && (
+        <>
+          <section className="summary-card">
+            <strong>System checks: {diagnosticsSummary.pass} passed, {diagnosticsSummary.warn} warnings, {diagnosticsSummary.fail} failed</strong>
+            <button className="small-button" onClick={() => setPage('diagnostics')}>Open Diagnostics</button>
+          </section>
 
       <section className="stats">
         <div><span>Status</span><strong className={dashboard?.up ? 'ok' : 'down'}><Circle size={12} fill="currentColor" />{dashboard?.up ? 'Up' : 'Down'}</strong></div>
@@ -498,22 +531,58 @@ function App() {
           </div>}
         </section>
       )}
+        </>
+      )}
 
-      <section className="details">
+      {page === 'diagnostics' && (
+        <section className="diagnostics-page">
+          {Object.entries(diagnosticsByGroup).map(([group, checks]) => (
+            <div className="onboarding" key={group}>
+              <div className="section-head">
+                <h2>{group}</h2>
+                <span>{checks.length} checks</span>
+              </div>
+              <div className="checklist">
+                {checks.map((check) => (
+                  <div className={`check-card ${check.state}`} key={check.key}>
+                    <div>
+                      <span className={`badge ${check.state}`}>{check.state}</span>
+                      <strong>{check.label}</strong>
+                    </div>
+                    <p>{check.detail}</p>
+                    {(check.fixes || []).map((fix) => (
+                      <div className="fix-row" key={`${check.key}-${fix.label}`}>
+                        <code>{fix.command}</code>
+                        <button className="small-button" onClick={() => copyText(fix.command)}>Copy</button>
+                      </div>
+                    ))}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {page === 'backups' && (
+      <section className="details backups-page">
         <div className="detail-grid">
           <div className="wide">
             <h2>Backups</h2>
             <p className="muted">Diffs are redacted before display. PrivateKey values are never shown.</p>
+            <button className="small-button" onClick={createBackupNow}>Create backup now</button>
           </div>
           {backups.length === 0 && <div className="wide"><strong>No backups found for {currentInterface}</strong></div>}
           {backups.map((backup) => (
             <div className="wide backup-row" key={backup.name}>
               <div>
+                <strong>{backup.name}</strong>
                 <strong>{backup.timestamp}</strong>
                 <span>{backup.interface} - {backup.size} B</span>
               </div>
               <div className="row-actions">
                 <button className="small-button" onClick={() => viewBackupDiff(backup)}>View diff</button>
+                <a className="small-button" href={`/api/backups/${encodeURIComponent(backup.name)}/download`}>Download redacted</a>
                 <button className="small-button" onClick={() => { setRestoreTarget(backup); setRestoreText('') }}><RotateCcw size={16} /> Restore</button>
               </div>
             </div>
@@ -524,6 +593,7 @@ function App() {
           <pre>{backupDiff || 'Select a backup to view its diff against the current config.'}</pre>
         </div>
       </section>
+      )}
 
       {result && (
         <section className="result">

@@ -47,3 +47,16 @@ def restore_backup_with_helper(helper_path: Path, interface: str, backup_path: P
         )
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(redact_text(exc.stderr or exc.stdout or "WireGuard restore failed")) from exc
+
+
+def create_backup_with_helper(helper_path: Path, interface: str) -> None:
+    try:
+        subprocess.run(
+            ["sudo", str(helper_path), "backup", "--interface", interface],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(redact_text(exc.stderr or exc.stdout or "WireGuard backup failed")) from exc

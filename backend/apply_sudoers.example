@@ -1,2 +1,4 @@
 wgpanel ALL=(root) NOPASSWD: /usr/local/sbin/wgpanel-helper apply --interface * --config /run/wgpanel/*.conf
 wgpanel ALL=(root) NOPASSWD: /usr/local/sbin/wgpanel-helper restore --interface * --backup /etc/wireguard/backups/*.bak
+wgpanel ALL=(root) NOPASSWD: /usr/local/sbin/wgpanel-helper backup --interface *
+wgpanel ALL=(root) NOPASSWD: /usr/local/sbin/wgpanel-helper self-test

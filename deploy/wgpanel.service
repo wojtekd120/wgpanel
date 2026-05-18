@@ -9,13 +9,14 @@ User=wgpanel
 Group=wgpanel
 WorkingDirectory=/opt/wgpanel/backend
 EnvironmentFile=/etc/wgpanel/wgpanel.env
-ExecStart=/opt/wgpanel/backend/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8080
+Environment=PYTHONPATH=/opt/wgpanel/backend
+ExecStart=/opt/wgpanel/backend/.venv/bin/uvicorn app.main:app --host ${WGPANEL_HOST} --port ${WGPANEL_PORT}
 Restart=on-failure
 RestartSec=3
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/wgpanel /run/wgpanel
+ReadWritePaths=/var/lib/wgpanel /run/wgpanel /etc/wireguard
 RuntimeDirectory=wgpanel
 RuntimeDirectoryMode=0750
 

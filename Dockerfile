@@ -11,6 +11,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:${PATH}" \
     PYTHONPATH=/app/backend \
+    WGPANEL_IN_DOCKER=true \
     WGPANEL_DATABASE_PATH=/var/lib/wgpanel/wgpanel.db \
     WGPANEL_WG_CONFIG_PATH=/etc/wireguard/wg0.conf \
     WGPANEL_HELPER_PATH=/usr/local/sbin/wgpanel-helper \

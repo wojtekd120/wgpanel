@@ -8,12 +8,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_prefix="WGPANEL_", populate_by_name=True)
 
-    database_path: Path = Field(default=Path("wgpanel.db"))
+    database_path: Path = Field(default=Path("wgpanel.db"), validation_alias=AliasChoices("WGPANEL_DATABASE_PATH", "WGPANEL_DB_PATH"))
     interface: str = Field(default="wg0")
+    host: str = Field(default="127.0.0.1")
+    port: int = Field(default=8080)
     wg_config_path: Path = Field(default=Path("/etc/wireguard/wg0.conf"), validation_alias=AliasChoices("WGPANEL_WG_CONFIG_PATH", "WGPANEL_WG_CONFIG"))
     backup_dir: Path = Field(default=Path("/etc/wireguard/backups"))
     helper_path: Path = Field(default=Path("/usr/local/sbin/wgpanel-helper"))
-    run_dir: Path = Field(default=Path("/run/wgpanel"))
+    run_dir: Path = Field(default=Path("/run/wgpanel"), validation_alias=AliasChoices("WGPANEL_RUN_DIR", "WGPANEL_RUNTIME_DIR"))
     network_cidr: str = Field(default="10.8.0.0/24")
     client_address_pool: str = Field(default="10.8.0.0/24")
     server_address: str = Field(default="10.8.0.1")
