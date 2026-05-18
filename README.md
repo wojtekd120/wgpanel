@@ -4,6 +4,18 @@
 
 WGPanel is a self-hosted web UI for managing WireGuard peers.
 
+## Screenshots
+
+Screenshots use demo data. No real private keys, endpoints, or client configurations are shown.
+
+### Dashboard
+
+![WGPanel dashboard](docs/screenshots/wgpanel-dashboard.png)
+
+### Client configuration
+
+![WGPanel client configuration](docs/screenshots/wgpanel-client-config.png)
+
 **Beta warning:** Test on a VM or back up your WireGuard config before using WGPanel on an important server.
 
 **Recommended install:** Docker Compose is the official recommended installation method for this beta-stable test release. Use the native systemd installer only if you specifically want to test the experimental native install path.
