@@ -1,10 +1,12 @@
 # WGPanel
 
-**Version:** `0.1.5-beta`
+**Version:** `0.1.6-beta`
 
 WGPanel is a self-hosted web UI for managing WireGuard peers.
 
 **Beta warning:** Test on a VM or back up your WireGuard config before using WGPanel on an important server.
+
+**Recommended install:** Docker Compose is the official recommended installation method for this beta-stable test release. Use the native systemd installer only if you specifically want to test the experimental native install path.
 
 WGPanel is designed to preserve existing WireGuard peers. Existing peers are shown as unmanaged until imported or taken over. WGPanel should only modify peers it manages. See [README_EXISTING_WIREGUARD.md](README_EXISTING_WIREGUARD.md).
 
@@ -26,7 +28,7 @@ WGPanel is designed to preserve existing WireGuard peers. Existing peers are sho
 - It does not provide speed/data limits. WireGuard has no native per-peer speed/data limit; future support would require `tc`/`nftables`.
 - It is not a replacement for installing WireGuard on the host.
 
-## Quick Start: Docker Compose
+## Quick Start: Docker Compose Recommended
 
 1. Install dependencies:
 
@@ -63,6 +65,12 @@ WGPANEL_SECURE_COOKIES=false
 
 ```bash
 docker compose up -d --build
+```
+
+If your host still uses the older Compose command:
+
+```bash
+docker-compose up -d --build
 ```
 
 5. Open:
@@ -140,15 +148,15 @@ WGPANEL_SECURE_COOKIES=true
 
 Do not expose plain HTTP WGPanel to the public internet.
 
-## Install Without Docker
+## Experimental Native/Systemd Install
 
-Docker Compose is the recommended easiest path. Native systemd installation is available for users who prefer not to run Docker:
+The native systemd installer is experimental. Use Docker Compose unless you specifically want to test native install.
 
 ```bash
 sudo ./scripts/install-systemd.sh
 ```
 
-See [INSTALL_SYSTEMD.md](INSTALL_SYSTEMD.md).
+Details are in [INSTALL_SYSTEMD.md](INSTALL_SYSTEMD.md). The scripts remain in the repo for future native-install work, but Docker Compose is the supported beginner path.
 
 ## Troubleshooting
 
