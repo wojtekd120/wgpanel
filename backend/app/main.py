@@ -502,28 +502,41 @@ def diagnostics_checks(
             fix_commands(f"mkdir -p {backup_dir} && chown root:wgpanel {backup_dir} && chmod 750 {backup_dir}", f"sudo mkdir -p {backup_dir} && sudo chown root:wgpanel {backup_dir} && sudo chmod 750 {backup_dir}"),
         )
 
+    helper_fixes = fix_commands(
+        "visudo -cf /etc/sudoers.d/wgpanel && sudo -n -l",
+        "sudo visudo -cf /etc/sudoers.d/wgpanel && sudo -u wgpanel sudo -n -l",
+    ) + fix_commands(
+        f"sudo -n {settings.helper_path} self-test",
+        f"sudo -u wgpanel sudo -n {settings.helper_path} self-test",
+    )
     try:
         result = subprocess.run(
-            ["sudo", "-n", "-l", str(settings.helper_path)],
+            ["sudo", "-n", str(settings.helper_path), "self-test"],
             check=False,
             capture_output=True,
             text=True,
             timeout=5,
         )
-        helper_output = (result.stdout or "") + (result.stderr or "")
-        if result.returncode == 0 and str(settings.helper_path) in helper_output:
-            add("helper_sudo", "Helper/sudo", "Helper sudo permission works", "pass", "sudoers allows the restricted helper.")
+        if result.returncode == 0:
+            add("helper_sudo", "Helper/sudo", "Helper sudo permission works", "pass", "Restricted helper self-test succeeded.")
         else:
             add(
                 "helper_sudo",
                 "Helper/sudo",
                 "Helper sudo permission works",
-                "fail",
-                "sudoers did not confirm helper access.",
-                fix_commands("visudo -cf /etc/sudoers.d/wgpanel && sudo -l", "sudo visudo -cf /etc/sudoers.d/wgpanel && sudo -l"),
+                "warn",
+                "Helper permission could not be verified automatically. Peer changes may still work if apply succeeds.",
+                helper_fixes,
             )
     except Exception:
-        add("helper_sudo", "Helper/sudo", "Helper sudo permission works", "warn", "Could not verify sudo helper access from this environment.", fix_commands("visudo -cf /etc/sudoers.d/wgpanel && sudo -l", "sudo visudo -cf /etc/sudoers.d/wgpanel && sudo -l"))
+        add(
+            "helper_sudo",
+            "Helper/sudo",
+            "Helper sudo permission works",
+            "warn",
+            "Helper permission could not be verified automatically. Peer changes may still work if apply succeeds.",
+            helper_fixes,
+        )
 
     if settings.secure_cookies:
         add("secure_cookies", "HTTPS/security", "Secure cookies enabled", "pass", "Session cookies require HTTPS.")

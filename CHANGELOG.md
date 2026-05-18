@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.1.5-beta
+
+- Added separate runtime and development backend requirements files.
+- Fixed native systemd installer repository copy/preflight flow.
+- Improved helper/sudo Diagnostics to use a safe restricted self-test and avoid false hard failures.
+- Corrected Docker vs systemd diagnostic commands.
+- Refined dark mode to use neutral slate/zinc surfaces instead of green-tinted cards.
+- Added CI workflow using the shared dependency files.
+
 ## 0.1.4-beta
 
 - Added browser-based first-run admin setup.

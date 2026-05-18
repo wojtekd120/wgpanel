@@ -136,6 +136,7 @@ function App() {
   const [backups, setBackups] = useState([])
   const [onboarding, setOnboarding] = useState([])
   const [page, setPage] = useState('dashboard')
+  const [dismissedDiagnostics, setDismissedDiagnostics] = useState(() => new Set())
   const [backupDiff, setBackupDiff] = useState('')
   const [restoreTarget, setRestoreTarget] = useState(null)
   const [restoreText, setRestoreText] = useState('')
@@ -272,12 +273,16 @@ function App() {
   }, [onboarding])
 
   const diagnosticsByGroup = useMemo(() => {
-    return onboarding.reduce((groups, item) => {
+    return onboarding.filter((item) => !dismissedDiagnostics.has(item.key)).reduce((groups, item) => {
       groups[item.group] = groups[item.group] || []
       groups[item.group].push(item)
       return groups
     }, {})
-  }, [onboarding])
+  }, [onboarding, dismissedDiagnostics])
+
+  const dismissDiagnostic = (key) => {
+    setDismissedDiagnostics((current) => new Set([...current, key]))
+  }
 
   const downloadConfig = () => {
     if (!result?.client_config) return
@@ -556,6 +561,10 @@ function App() {
                         <button className="small-button" onClick={() => copyText(fix.command)}>Copy</button>
                       </div>
                     ))}
+                    <div className="diagnostic-actions">
+                      <button className="small-button" onClick={load}>Recheck</button>
+                      <button className="small-button" onClick={() => dismissDiagnostic(check.key)}>Dismiss for this session</button>
+                    </div>
                   </div>
                 ))}
               </div>
