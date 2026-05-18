@@ -6,8 +6,6 @@ WGPanel is a self-hosted web UI for managing WireGuard peers.
 
 ## Screenshots
 
-Screenshots use demo data. No real private keys, endpoints, or client configurations are shown.
-
 ### Dashboard
 
 ![WGPanel dashboard](docs/screenshots/wgpanel-dashboard.png)
