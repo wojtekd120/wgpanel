@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.6-beta
+
+- Marked Docker Compose as the official recommended installation method.
+- Marked native/systemd install as experimental and advanced.
+- Simplified README Quick Start around Docker Compose.
+- Added beta-stable update guidance for Docker-based testers.
+
 ## 0.1.5-beta
 
 - Added separate runtime and development backend requirements files.

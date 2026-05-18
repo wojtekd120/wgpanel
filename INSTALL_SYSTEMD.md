@@ -1,6 +1,14 @@
 # Native Systemd Install
 
-Docker Compose is the recommended easiest install path. The native systemd installer is supported and tested for users who prefer WGPanel to run directly on Debian/Ubuntu without Docker.
+**Experimental. Docker Compose is recommended for now.**
+
+The native systemd installer is kept for advanced testing and future native-install work. Use Docker Compose unless you specifically want to test WGPanel running directly under systemd.
+
+Depending on the Debian/Ubuntu version, host permissions, sudo policy, and existing WireGuard layout, native installs may need manual permission repair after installation:
+
+```bash
+sudo ./scripts/repair-systemd-permissions.sh
+```
 
 ## Quick Install
 
