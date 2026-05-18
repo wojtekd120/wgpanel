@@ -15,11 +15,23 @@ need_root() {
   fi
 }
 
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "${script_dir}/.." && pwd)"
+
+require_repo_file() {
+  local path="$1"
+  [[ -e "${repo_root}/${path}" ]] || die "repository is incomplete: missing ${path}. Re-clone WGPanel and run this script from the repo."
+}
+
 need_root
 [[ -f /etc/os-release ]] || die "cannot detect OS"
 . /etc/os-release
 [[ "${ID:-}" == "debian" || "${ID:-}" == "ubuntu" || "${ID_LIKE:-}" == *debian* ]] || die "Debian/Ubuntu required"
 command -v systemctl >/dev/null 2>&1 || die "systemd is required"
+require_repo_file "backend/requirements.txt"
+require_repo_file "backend/app"
+require_repo_file "frontend/package.json"
+require_repo_file "helper/wgpanel-helper"
 
 say "WGPanel native systemd installer"
 install_path="$(ask 'Install path' '/opt/wgpanel')"
@@ -99,7 +111,20 @@ secure_cookies="$(ask 'Secure cookies? true behind HTTPS, false for local HTTP' 
 say "Installing WGPanel files"
 id "$wgpanel_user" >/dev/null 2>&1 || adduser --system --group --home "$data_dir" "$wgpanel_user"
 mkdir -p "$install_path" "$config_dir" "$data_dir" "$runtime_dir"
-rsync -a --delete --exclude .git ./ "$install_path/"
+if [[ -d "$install_path" ]] && [[ -n "$(find "$install_path" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+  confirm "$install_path already exists. Update files from this repository?" || die "install canceled"
+fi
+rsync -a --delete \
+  --exclude .git \
+  --exclude node_modules \
+  --exclude .venv \
+  --exclude '*.db' \
+  --exclude '*.sqlite' \
+  --exclude '*.sqlite3' \
+  --exclude '*.log' \
+  --exclude .env \
+  "$repo_root/" "$install_path/"
+[[ -f "$install_path/backend/requirements.txt" ]] || die "copy failed: $install_path/backend/requirements.txt is missing"
 chown -R "$wgpanel_user:$wgpanel_user" "$data_dir" "$runtime_dir"
 chown root:"$wgpanel_user" "$config_dir"
 chmod 750 "$config_dir" "$data_dir" "$runtime_dir"

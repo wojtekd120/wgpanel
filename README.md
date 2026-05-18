@@ -1,6 +1,6 @@
 # WGPanel
 
-**Version:** `0.1.4-beta`
+**Version:** `0.1.5-beta`
 
 WGPanel is a self-hosted web UI for managing WireGuard peers.
 
@@ -89,6 +89,14 @@ Advanced password hash generation remains available:
 docker compose run --rm wgpanel hash-password
 ```
 
+Backend development/test dependencies are installed with:
+
+```bash
+cd backend
+python -m pip install -r requirements-dev.txt
+python -m pytest
+```
+
 ## Existing WireGuard Safety
 
 Before first start, make your own backup too:
@@ -103,6 +111,8 @@ WGPanel reads `/etc/wireguard/<interface>.conf` before every apply and preserves
 ## Diagnostics And Backups
 
 The dashboard shows a compact system-check summary. Open **Diagnostics** for grouped WireGuard, config, backup, helper/sudo, HTTPS, and runtime checks with Docker-aware fix commands and copy buttons.
+
+The helper/sudo check safely runs the restricted helper self-test. It does not modify live WireGuard config. If peer apply works but Diagnostics shows a warning, click **Recheck** and inspect `docker compose logs wgpanel`.
 
 Open **Backups** to list backups, create a backup now, view redacted diffs, download redacted backup text, or restore after typing `RESTORE <interface>`.
 

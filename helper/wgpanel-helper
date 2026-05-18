@@ -105,9 +105,9 @@ def create_backup(interface: str) -> None:
 
 
 def self_test() -> None:
+    if os.geteuid() != 0:
+        fail("helper must run as root")
     validate_interface("wg0")
-    RUN_DIR.mkdir(parents=True, exist_ok=True)
-    BACKUP_DIR.mkdir(mode=0o750, parents=True, exist_ok=True)
     print("wgpanel-helper self-test ok")
 
 

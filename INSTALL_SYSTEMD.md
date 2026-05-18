@@ -1,6 +1,6 @@
 # Native Systemd Install
 
-Docker Compose is the recommended easiest install path. Use the native systemd installer if you prefer WGPanel to run directly on Debian/Ubuntu without Docker.
+Docker Compose is the recommended easiest install path. The native systemd installer is supported and tested for users who prefer WGPanel to run directly on Debian/Ubuntu without Docker.
 
 ## Quick Install
 
@@ -9,6 +9,16 @@ sudo ./scripts/install-systemd.sh
 ```
 
 The installer is interactive. It can use an existing WireGuard interface, create a new basic WireGuard config, or skip WireGuard setup and only install WGPanel.
+
+Run it from a complete repository checkout:
+
+```bash
+git clone https://github.com/wojtekd120/wgpanel.git
+cd wgpanel
+sudo ./scripts/install-systemd.sh
+```
+
+The installer checks that `backend/requirements.txt`, `backend/app`, `frontend/package.json`, and `helper/wgpanel-helper` exist before it copies files to `/opt/wgpanel`. It excludes `.git`, `node_modules`, virtualenvs, SQLite databases, logs, and `.env`.
 
 ## Existing WireGuard
 
@@ -67,6 +77,7 @@ The uninstall script leaves `/etc/wireguard` untouched by default. It asks separ
 - Check health: `curl http://127.0.0.1:8080/healthz`
 - Check WireGuard: `sudo wg show wg0`
 - Check helper permission: `sudo -u wgpanel sudo -n -l`
+- Check helper self-test: `sudo -u wgpanel sudo -n /usr/local/sbin/wgpanel-helper self-test`
 - Check config readability: `sudo -u wgpanel test -r /etc/wireguard/wg0.conf`
 
 ## Manual Test Checklist

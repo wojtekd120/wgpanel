@@ -64,3 +64,18 @@ def test_helper_rejects_backup_outside_backup_dir(tmp_path, monkeypatch):
 
     with pytest.raises(SystemExit):
         helper.validate_backup_path(str(outside), "wg0")
+
+
+def test_helper_self_test_does_not_modify_config_or_backup_dirs(tmp_path, monkeypatch, capsys):
+    helper = load_helper()
+    run_dir = tmp_path / "run" / "wgpanel"
+    backup_dir = tmp_path / "etc" / "wireguard" / "backups"
+    monkeypatch.setattr(helper, "RUN_DIR", run_dir)
+    monkeypatch.setattr(helper, "BACKUP_DIR", backup_dir)
+    monkeypatch.setattr(helper.os, "geteuid", lambda: 0, raising=False)
+
+    helper.self_test()
+
+    assert "self-test ok" in capsys.readouterr().out
+    assert not run_dir.exists()
+    assert not backup_dir.exists()

@@ -31,6 +31,14 @@ FastAPI runs as the unprivileged `wgpanel` user. Passwordless sudo is limited to
 
 The helper is root-owned. It rejects config paths outside `/run/wgpanel`, validates the config with `wg-quick strip`, creates a backup, and then applies with `wg syncconf <interface>`.
 
+Diagnostics verifies the same restricted path with:
+
+```bash
+sudo -n /usr/local/sbin/wgpanel-helper self-test
+```
+
+The self-test does not modify live WireGuard config. If this cannot be verified automatically, WGPanel shows a warning instead of a hard failure.
+
 ## Config Backups
 
 Before each real apply, WGPanel creates a timestamped backup under `/etc/wireguard/backups`. Backups and `wg0.conf` are not world-readable because they contain the server private key.

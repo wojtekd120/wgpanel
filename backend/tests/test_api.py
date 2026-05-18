@@ -1,5 +1,6 @@
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+import subprocess
 
 import pytest
 from fastapi.testclient import TestClient
@@ -247,6 +248,36 @@ def test_diagnostics_returns_docker_aware_commands(api_client, monkeypatch):
     assert any("docker compose exec wgpanel" in command for command in commands)
     assert any("visudo -cf /etc/sudoers.d/wgpanel" in command for command in commands)
     assert any("mkdir -p" in command and "backups" in command for command in commands)
+
+
+def test_diagnostics_helper_check_passes_when_self_test_succeeds(api_client, monkeypatch):
+    def ok_run(argv, **kwargs):
+        if "self-test" in argv:
+            return subprocess.CompletedProcess(argv, 0, "ok", "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(main.subprocess, "run", ok_run)
+
+    response = api_client.get("/api/diagnostics")
+
+    helper = next(check for check in response.json() if check["key"] == "helper_sudo")
+    assert helper["state"] == "pass"
+    assert "self-test succeeded" in helper["detail"]
+
+
+def test_diagnostics_helper_check_warns_when_inconclusive(api_client, monkeypatch):
+    def failed_run(argv, **kwargs):
+        if "self-test" in argv:
+            return subprocess.CompletedProcess(argv, 1, "", "not allowed")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(main.subprocess, "run", failed_run)
+
+    response = api_client.get("/api/diagnostics")
+
+    helper = next(check for check in response.json() if check["key"] == "helper_sudo")
+    assert helper["state"] == "warn"
+    assert "could not be verified automatically" in helper["detail"]
 
 
 def test_error_responses_are_redacted(api_client, monkeypatch):
