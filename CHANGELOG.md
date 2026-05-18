@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.1.4-beta
+
+- Added browser-based first-run admin setup.
+- Simplified beginner installation flow.
+- Cleaned `.env.example`.
+- Moved checklist to Diagnostics.
+- Added Docker-aware diagnostic fix commands.
+- Added backup management page.
+- Fixed deleted managed peers reappearing as unmanaged.
+- Improved mobile layout.
+- Added MIT license.
+
 ## 0.1.3-beta
 
 - Added multi-interface support.

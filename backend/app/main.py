@@ -15,9 +15,9 @@ from fastapi.requests import Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config_apply import apply_config_with_helper, restore_backup_with_helper
+from .config_apply import apply_config_with_helper, create_backup_with_helper, restore_backup_with_helper
 from .db import connect, get_db, init_db
-from .models import ConfigDiffRequest, CreatePeerRequest, CreatePeerResponse, Dashboard, InterfaceSelectionRequest, LoginRequest, OnboardingCheck, Peer, RestoreBackupRequest, SetupRequest, TakeOwnershipRequest, UpdatePeerRequest, WgPeerStatus
+from .models import ConfigDiffRequest, CreatePeerRequest, CreatePeerResponse, Dashboard, DiagnosticsCheck, InterfaceSelectionRequest, LoginRequest, OnboardingCheck, Peer, RestoreBackupRequest, SetupRequest, TakeOwnershipRequest, UpdatePeerRequest, WgPeerStatus
 from .redaction import redact, redact_text
 from .security import hash_password, new_session_token, new_setup_token, session_expiry, setup_expiry, token_digest, utcnow, verify_password
 from .settings import Settings, get_settings
@@ -49,6 +49,7 @@ app.add_middleware(
 )
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
+ATTEMPTS: dict[str, list[datetime]] = {}
 
 
 @app.on_event("startup")
@@ -56,7 +57,11 @@ def startup() -> None:
     init_db()
     with connect() as conn:
         migrate_env_admin(conn, get_settings())
-        ensure_setup_token(conn, get_settings())
+        if not admin_exists(conn) and not get_settings().admin_password_hash:
+            if get_settings().host == "0.0.0.0":
+                print("First-run setup is active. Complete setup immediately. Do not expose this over the public internet without HTTPS.")
+            else:
+                print("First-run setup is active. Open WGPanel in a browser to create the admin account.")
 
 
 @app.exception_handler(RequestValidationError)
@@ -69,6 +74,8 @@ def validation_exception_handler(request: Request, exc: RequestValidationError) 
             return JSONResponse(status_code=422, content={"detail": "Peer name is required"})
         if field == "expires_at":
             return JSONResponse(status_code=422, content={"detail": "Invalid expiration date"})
+        if field in {"password", "confirm_password"} and "12" in message:
+            return JSONResponse(status_code=422, content={"detail": "Password must be at least 12 characters."})
         if field in {"custom_allowed_ips", "tunnel_mode"}:
             return JSONResponse(status_code=422, content={"detail": "Invalid AllowedIPs"})
         if error_type == "missing":
@@ -184,6 +191,20 @@ def setup_required() -> bool:
         return not admin_exists(conn) and not get_settings().admin_password_hash
 
 
+def rate_limit(request: Request, bucket: str, limit: int = 10, window_seconds: int = 300) -> None:
+    now = utcnow()
+    key = f"{bucket}:{request.client.host if request.client else 'unknown'}"
+    recent = [
+        item
+        for item in ATTEMPTS.get(key, [])
+        if (now - item).total_seconds() < window_seconds
+    ]
+    if len(recent) >= limit:
+        raise HTTPException(status_code=429, detail="Too many attempts. Try again in a few minutes.")
+    recent.append(now)
+    ATTEMPTS[key] = recent
+
+
 def row_to_peer(row: sqlite3.Row) -> Peer:
     expires_at = datetime.fromisoformat(row["expires_at"]) if row["expires_at"] else None
     status = "Disabled" if bool(row["disabled"]) else "Active"
@@ -235,6 +256,19 @@ def managed_public_keys_for_interface(db: sqlite3.Connection, interface: str) ->
     return {row["public_key"] for row in rows} | {row["public_key"] for row in deleted}
 
 
+def running_in_docker() -> bool:
+    return Path("/.dockerenv").exists() or os.environ.get("WGPANEL_IN_DOCKER") == "true"
+
+
+def fix_commands(docker_command: str, host_command: str) -> list[dict[str, str]]:
+    if running_in_docker():
+        return [
+            {"label": "Docker Compose V2", "command": f"docker compose exec wgpanel sh -lc '{docker_command}'"},
+            {"label": "Docker Compose V1", "command": f"docker-compose exec wgpanel sh -lc '{docker_command}'"},
+        ]
+    return [{"label": "Systemd host", "command": host_command}]
+
+
 def require_auth(request: Request, settings: Settings = Depends(get_settings)) -> None:
     if setup_required():
         raise HTTPException(status_code=403, detail="First-run setup is required")
@@ -249,7 +283,10 @@ def require_auth(request: Request, settings: Settings = Depends(get_settings)) -
 
 
 @app.post("/api/login")
-def login(payload: LoginRequest, response: Response, settings: Settings = Depends(get_settings)) -> dict[str, bool]:
+def login(payload: LoginRequest, response: Response, request: Request, settings: Settings = Depends(get_settings)) -> dict[str, bool]:
+    rate_limit(request, "login", limit=12)
+    if setup_required():
+        raise HTTPException(status_code=403, detail="First-run setup is required")
     with connect() as conn:
         admin = conn.execute("SELECT password_hash FROM admins WHERE username = ?", (payload.username,)).fetchone()
     password_hash = admin["password_hash"] if admin else settings.admin_password_hash
@@ -323,20 +360,27 @@ def set_interface(
 
 
 @app.post("/api/setup")
-def complete_setup(payload: SetupRequest, settings: Settings = Depends(get_settings)) -> dict[str, bool]:
+def complete_setup(payload: SetupRequest, request: Request, settings: Settings = Depends(get_settings)) -> dict[str, bool]:
+    rate_limit(request, "setup", limit=8)
+    if settings.secure_cookies and request.url.scheme != "https":
+        raise HTTPException(status_code=400, detail="HTTPS is required when secure cookies are enabled. Set WGPANEL_SECURE_COOKIES=false only for local HTTP testing.")
     if payload.password != payload.confirm_password:
         raise HTTPException(status_code=422, detail="Passwords do not match")
     with connect() as conn:
         if admin_exists(conn):
-            raise HTTPException(status_code=409, detail="Setup is already complete")
-        row = conn.execute("SELECT * FROM setup_tokens WHERE token_digest = ? AND used = 0", (token_digest(payload.token),)).fetchone()
-        if not row or datetime.fromisoformat(row["expires_at"]) <= utcnow():
-            raise HTTPException(status_code=401, detail="Setup token is invalid or expired")
+            raise HTTPException(status_code=409, detail="Setup is already completed.")
+        if settings.admin_password_hash:
+            raise HTTPException(status_code=409, detail="Setup is already completed.")
+        if payload.token:
+            row = conn.execute("SELECT * FROM setup_tokens WHERE token_digest = ? AND used = 0", (token_digest(payload.token),)).fetchone()
+            if not row or datetime.fromisoformat(row["expires_at"]) <= utcnow():
+                raise HTTPException(status_code=401, detail="Setup token is invalid or expired")
         conn.execute(
             "INSERT INTO admins (username, password_hash, created_at) VALUES (?, ?, ?)",
             (payload.username, hash_password(payload.password), utcnow().isoformat()),
         )
-        conn.execute("UPDATE setup_tokens SET used = 1 WHERE token_digest = ?", (token_digest(payload.token),))
+        if payload.token:
+            conn.execute("UPDATE setup_tokens SET used = 1 WHERE token_digest = ?", (token_digest(payload.token),))
         conn.commit()
     token_path = settings.database_path.parent / "setup-token"
     token_path.unlink(missing_ok=True)
@@ -389,17 +433,17 @@ def dashboard(
     )
 
 
-@app.get("/api/onboarding", response_model=list[OnboardingCheck], dependencies=[Depends(require_auth)])
-def onboarding_checks(
+@app.get("/api/diagnostics", response_model=list[DiagnosticsCheck], dependencies=[Depends(require_auth)])
+def diagnostics_checks(
     interface: str = Depends(get_interface_from_request),
     settings: Settings = Depends(get_settings),
     db: sqlite3.Connection = Depends(get_db),
-) -> list[OnboardingCheck]:
-    checks: list[OnboardingCheck] = []
+) -> list[DiagnosticsCheck]:
+    checks: list[DiagnosticsCheck] = []
     config_path = settings.wg_config_path if interface == settings.interface else config_path_for_selected_interface(interface)
 
-    def add(key: str, label: str, state: str, detail: str, fix: str = "") -> None:
-        checks.append(OnboardingCheck(key=key, label=label, state=state, detail=detail, fix=fix))
+    def add(key: str, group: str, label: str, state: str, detail: str, fixes: list[dict[str, str]] | None = None) -> None:
+        checks.append(DiagnosticsCheck(key=key, group=group, label=label, state=state, detail=detail, fixes=fixes or []))
 
     try:
         active_interfaces = set(run_wg_interfaces())
@@ -407,40 +451,56 @@ def onboarding_checks(
         active_interfaces = set()
 
     if interface in active_interfaces:
-        add("interface_exists", "Selected interface exists", "pass", f"{interface} is active on the host.")
+        add("interface_exists", "WireGuard", "Selected interface exists", "pass", f"{interface} is active on the host.")
     else:
-        add("interface_exists", "Selected interface exists", "fail", f"{interface} is not reported by wg show interfaces.", f"sudo systemctl start wg-quick@{interface}")
+        add(
+            "interface_exists",
+            "WireGuard",
+            "Selected interface exists",
+            "fail",
+            f"{interface} is not reported by wg show interfaces.",
+            fix_commands(f"wg show interfaces && wg show {interface}", f"sudo systemctl start wg-quick@{interface}"),
+        )
 
     if config_path.exists():
-        add("config_exists", "WireGuard config exists", "pass", f"{config_path} exists.")
+        add("config_exists", "Config files", "WireGuard config exists", "pass", f"{config_path} exists.")
     else:
-        add("config_exists", "WireGuard config exists", "fail", f"{config_path} is missing.", f"sudo nano {config_path}")
+        add("config_exists", "Config files", "WireGuard config exists", "fail", f"{config_path} is missing.", fix_commands(f"ls -l {config_path}", f"sudo nano {config_path}"))
 
     try:
         read_config(config_path)
-        add("config_readable", "Config readable", "pass", "WGPanel can read the WireGuard config.")
+        add("config_readable", "Config files", "Config readable", "pass", "WGPanel can read the WireGuard config.")
     except Exception:
         add(
             "config_readable",
+            "Config files",
             "Config readable",
             "fail",
             f"WGPanel cannot read {config_path}.",
-            f"sudo chown root:wgpanel /etc/wireguard {config_path} && sudo chmod 750 /etc/wireguard && sudo chmod 640 {config_path}",
+            fix_commands(
+                f"chown root:wgpanel /etc/wireguard {config_path} && chmod 750 /etc/wireguard && chmod 640 {config_path}",
+                f"sudo chown root:wgpanel /etc/wireguard {config_path} && sudo chmod 750 /etc/wireguard && sudo chmod 640 {config_path}",
+            ),
         )
 
     try:
         run_wg_dump(interface)
-        add("wg_show", "wg show works", "pass", f"wg show {interface} dump succeeded.")
+        add("wg_show", "WireGuard", "wg show works", "pass", f"wg show {interface} dump succeeded.")
     except Exception:
-        add("wg_show", "wg show works", "fail", f"wg show {interface} dump failed.", f"docker-compose exec wgpanel wg show {interface}")
+        add("wg_show", "WireGuard", "wg show works", "fail", f"wg show {interface} dump failed.", fix_commands(f"wg show {interface}", f"sudo wg show {interface}"))
 
     backup_dir = settings.backup_dir
-    if backup_dir.exists() and os.access(backup_dir, os.W_OK):
-        add("backup_dir", "Backup directory writable", "pass", f"{backup_dir} exists and is writable.")
-    elif backup_dir.exists():
-        add("backup_dir", "Backup directory writable", "fail", f"{backup_dir} exists but is not writable.", f"sudo chown root:wgpanel {backup_dir} && sudo chmod 750 {backup_dir}")
+    if backup_dir.exists():
+        add("backup_dir", "Backups", "Backup directory exists", "pass", f"{backup_dir} exists. The root-owned helper writes backup files.")
     else:
-        add("backup_dir", "Backup directory writable", "warn", f"{backup_dir} does not exist yet.", f"sudo mkdir -p {backup_dir} && sudo chown root:wgpanel {backup_dir} && sudo chmod 750 {backup_dir}")
+        add(
+            "backup_dir",
+            "Backups",
+            "Backup directory exists",
+            "warn",
+            f"{backup_dir} does not exist yet.",
+            fix_commands(f"mkdir -p {backup_dir} && chown root:wgpanel {backup_dir} && chmod 750 {backup_dir}", f"sudo mkdir -p {backup_dir} && sudo chown root:wgpanel {backup_dir} && sudo chmod 750 {backup_dir}"),
+        )
 
     try:
         result = subprocess.run(
@@ -452,18 +512,30 @@ def onboarding_checks(
         )
         helper_output = (result.stdout or "") + (result.stderr or "")
         if result.returncode == 0 and str(settings.helper_path) in helper_output:
-            add("helper_sudo", "Helper sudo permission works", "pass", "sudoers allows the restricted helper.")
+            add("helper_sudo", "Helper/sudo", "Helper sudo permission works", "pass", "sudoers allows the restricted helper.")
         else:
-            add("helper_sudo", "Helper sudo permission works", "fail", "sudoers did not confirm helper access.", "sudo visudo -cf /etc/sudoers.d/wgpanel")
+            add(
+                "helper_sudo",
+                "Helper/sudo",
+                "Helper sudo permission works",
+                "fail",
+                "sudoers did not confirm helper access.",
+                fix_commands("visudo -cf /etc/sudoers.d/wgpanel && sudo -l", "sudo visudo -cf /etc/sudoers.d/wgpanel && sudo -l"),
+            )
     except Exception:
-        add("helper_sudo", "Helper sudo permission works", "warn", "Could not verify sudo helper access from this environment.", "docker-compose exec wgpanel sudo -n -l")
+        add("helper_sudo", "Helper/sudo", "Helper sudo permission works", "warn", "Could not verify sudo helper access from this environment.", fix_commands("visudo -cf /etc/sudoers.d/wgpanel && sudo -l", "sudo visudo -cf /etc/sudoers.d/wgpanel && sudo -l"))
 
     if settings.secure_cookies:
-        add("secure_cookies", "Secure cookies enabled", "pass", "Session cookies require HTTPS.")
-        add("https_proxy", "HTTPS/reverse proxy", "pass", "Use Caddy, Nginx, or another HTTPS reverse proxy in production.")
+        add("secure_cookies", "HTTPS/security", "Secure cookies enabled", "pass", "Session cookies require HTTPS.")
+        add("https_proxy", "HTTPS/security", "HTTPS/reverse proxy", "pass", "Use Caddy, Nginx, or another HTTPS reverse proxy in production.")
     else:
-        add("secure_cookies", "Secure cookies enabled", "warn", "Secure cookies are disabled for HTTP testing.", "Set WGPANEL_SECURE_COOKIES=true behind HTTPS.")
-        add("https_proxy", "HTTPS/reverse proxy", "warn", "Do not expose plain HTTP to the internet.", "Use Caddy or Nginx with HTTPS before public exposure.")
+        add("secure_cookies", "HTTPS/security", "Secure cookies enabled", "warn", "Secure cookies are disabled for HTTP testing.", [{"label": "Env", "command": "WGPANEL_SECURE_COOKIES=true"}])
+        add("https_proxy", "HTTPS/security", "HTTPS/reverse proxy", "warn", "Do not expose plain HTTP to the internet.", [{"label": "SSH tunnel", "command": "ssh -L 8080:127.0.0.1:8080 user@server"}])
+
+    if running_in_docker():
+        add("runtime", "Docker/runtime", "Runtime", "pass", "WGPanel is running in Docker; diagnostics show Docker-aware commands.")
+    else:
+        add("runtime", "Docker/runtime", "Runtime", "pass", "WGPanel is running as a native/systemd install; diagnostics show host commands.")
 
     try:
         managed_keys = managed_public_keys_for_interface(db, interface)
@@ -475,15 +547,25 @@ def onboarding_checks(
         state = "warn" if unmanaged_count else "pass"
         add(
             "unmanaged_peers",
+            "WireGuard",
             "Unmanaged peers",
             state,
             f"{unmanaged_count} unmanaged peer{'s' if unmanaged_count != 1 else ''} preserved.",
-            "Use Take ownership when you want WGPanel to manage an existing peer." if unmanaged_count else "",
+            [{"label": "Action", "command": "Use Take ownership in the peer list when you want WGPanel to manage an existing peer."}] if unmanaged_count else [],
         )
     except Exception:
-        add("unmanaged_peers", "Unmanaged peers", "warn", "Could not count unmanaged peers until the config is readable.")
+        add("unmanaged_peers", "WireGuard", "Unmanaged peers", "warn", "Could not count unmanaged peers until the config is readable.")
 
     return checks
+
+
+@app.get("/api/onboarding", response_model=list[DiagnosticsCheck], dependencies=[Depends(require_auth)])
+def onboarding_checks(
+    interface: str = Depends(get_interface_from_request),
+    settings: Settings = Depends(get_settings),
+    db: sqlite3.Connection = Depends(get_db),
+) -> list[DiagnosticsCheck]:
+    return diagnostics_checks(interface, settings, db)
 
 
 @app.get("/api/peers", response_model=list[Peer], dependencies=[Depends(require_auth)])
@@ -806,8 +888,9 @@ def list_backups(
     interface: str = Depends(get_interface_from_request),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, list[dict[str, object]]]:
-    settings.backup_dir.mkdir(parents=True, exist_ok=True)
     backups = []
+    if not settings.backup_dir.exists():
+        return {"backups": backups}
     for path in sorted(settings.backup_dir.glob(f"{interface}.conf.*.bak"), reverse=True):
         if not path.is_file():
             continue
@@ -843,6 +926,30 @@ def backup_diff(
         )
     )
     return {"diff": diff}
+
+
+@app.post("/api/backups", dependencies=[Depends(require_auth)])
+def create_backup(
+    interface: str = Depends(get_interface_from_request),
+    settings: Settings = Depends(get_settings),
+) -> dict[str, str]:
+    create_backup_with_helper(settings.helper_path, interface)
+    return {"detail": "Backup created"}
+
+
+@app.get("/api/backups/{backup_name}/download", dependencies=[Depends(require_auth)])
+def download_backup(
+    backup_name: str,
+    interface: str = Depends(get_interface_from_request),
+    settings: Settings = Depends(get_settings),
+) -> Response:
+    backup_path = backup_path_from_name(settings, interface, backup_name)
+    redacted = redact_private_keys(backup_path.read_text(encoding="utf-8"))
+    return Response(
+        content=redacted,
+        media_type="text/plain",
+        headers={"Content-Disposition": f'attachment; filename="{backup_name}.redacted.txt"'},
+    )
 
 
 @app.post("/api/backups/{backup_name}/restore", dependencies=[Depends(require_auth)])

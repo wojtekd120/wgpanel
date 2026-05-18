@@ -85,6 +85,32 @@ def restore(interface: str, backup_path: Path) -> None:
         _apply_locked(validate_interface(interface), backup_path)
 
 
+def create_backup(interface: str) -> None:
+    if os.geteuid() != 0:
+        fail("helper must run as root")
+    interface = validate_interface(interface)
+    target_config = config_path_for_interface(interface)
+    if not target_config.is_file():
+        fail("target config does not exist")
+    BACKUP_DIR.mkdir(mode=0o750, parents=True, exist_ok=True)
+    if grp is not None:
+        os.chown(BACKUP_DIR, 0, grp.getgrnam("wgpanel").gr_gid)
+    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    backup_path = BACKUP_DIR / f"{interface}.conf.{timestamp}.bak"
+    shutil.copy2(target_config, backup_path)
+    if grp is not None:
+        os.chown(backup_path, 0, grp.getgrnam("wgpanel").gr_gid)
+    os.chmod(backup_path, 0o640)
+    print(str(backup_path))
+
+
+def self_test() -> None:
+    validate_interface("wg0")
+    RUN_DIR.mkdir(parents=True, exist_ok=True)
+    BACKUP_DIR.mkdir(mode=0o750, parents=True, exist_ok=True)
+    print("wgpanel-helper self-test ok")
+
+
 def _apply_locked(interface: str, config_path: Path) -> None:
     target_config = config_path_for_interface(interface)
     with tempfile.NamedTemporaryFile("w", prefix="wgpanel.strip.", suffix=".conf", delete=False) as stripped:
@@ -136,12 +162,19 @@ def main() -> None:
     restore_parser = sub.add_parser("restore")
     restore_parser.add_argument("--interface", required=True)
     restore_parser.add_argument("--backup", required=True)
+    backup_parser = sub.add_parser("backup")
+    backup_parser.add_argument("--interface", required=True)
+    sub.add_parser("self-test")
     args = parser.parse_args()
 
     if args.command == "apply":
         apply(args.interface, validate_config_path(args.config))
     elif args.command == "restore":
         restore(args.interface, validate_backup_path(args.backup, args.interface))
+    elif args.command == "backup":
+        create_backup(args.interface)
+    elif args.command == "self-test":
+        self_test()
 
 
 if __name__ == "__main__":

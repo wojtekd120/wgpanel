@@ -42,6 +42,7 @@ button {
   padding: 0 14px;
 }
 
+a.small-button { text-decoration: none; }
 button:disabled { cursor: not-allowed; opacity: .65; }
 
 input, textarea, select {
@@ -65,7 +66,7 @@ small { color: var(--muted); display: block; font-size: 12px; margin-top: 4px; }
   border-radius: 8px;
 }
 .login-panel { display: grid; gap: 16px; padding: 28px; width: min(380px, calc(100vw - 32px)); }
-.brand-row, .topbar, .actions, .row-actions, .ok, .down { align-items: center; display: flex; gap: 10px; }
+.brand-row, .topbar, .actions, .row-actions, .ok, .down, .tabs, .summary-card { align-items: center; display: flex; gap: 10px; }
 .brand-row h1, .topbar h1 { font-size: 24px; font-weight: 750; margin: 0; }
 
 .app-shell { margin: 0 auto; max-width: 1180px; padding: 18px; }
@@ -85,6 +86,10 @@ small { color: var(--muted); display: block; font-size: 12px; margin-top: 4px; }
 .banner { background: #fff0f0; border: 1px solid #efc7c7; border-radius: 6px; margin-bottom: 14px; padding: 10px 12px; }
 .notice { background: #eef7ff; border: 1px solid #b8d8ef; border-radius: 6px; color: #24516e; margin-bottom: 18px; padding: 10px 12px; }
 [data-theme="dark"] .notice { background: #132536; border-color: #31516c; color: #b8d8ef; }
+.tabs { flex-wrap: wrap; margin-bottom: 14px; }
+.tabs button { background: var(--panel); border: 1px solid var(--line); color: var(--text); }
+.tabs button.active { background: #1f6f5b; border-color: #1f6f5b; color: white; }
+.summary-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; justify-content: space-between; margin-bottom: 18px; padding: 14px 16px; }
 
 .section-head { align-items: center; display: flex; justify-content: space-between; margin-bottom: 12px; }
 .section-head h2 { font-size: 17px; margin: 0; }
@@ -95,6 +100,7 @@ small { color: var(--muted); display: block; font-size: 12px; margin-top: 4px; }
 .check-card div { align-items: center; display: flex; gap: 8px; }
 .check-card p { color: var(--muted); font-size: 13px; line-height: 1.35; margin: 0; }
 .check-card code { background: var(--soft); border-radius: 6px; display: block; font-size: 12px; overflow-wrap: anywhere; padding: 8px; }
+.fix-row { align-items: start; display: grid; gap: 8px; grid-template-columns: 1fr auto; }
 .check-card.pass { border-color: #b8dfcf; }
 .check-card.warn { border-color: #e7cc88; }
 .check-card.fail { border-color: #efb3b3; }
@@ -176,6 +182,9 @@ small { color: var(--muted); display: block; font-size: 12px; margin-top: 4px; }
   .config-actions button { flex: 1 1 150px; }
   .backup-row { align-items: stretch; flex-direction: column; gap: 10px; }
   .modal-actions { flex-wrap: wrap; }
+  .summary-card { align-items: stretch; flex-direction: column; }
+  .fix-row { grid-template-columns: 1fr; }
+  .tabs button { flex: 1 1 120px; }
 }
 
 @media (max-width: 480px) {

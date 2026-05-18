@@ -43,6 +43,7 @@ def api_client(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "restore_backup_with_helper", lambda *args, **kwargs: None)
     main.app.dependency_overrides[main.require_auth] = lambda: None
     main.app.dependency_overrides[get_settings] = lambda: settings
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
 
     def override_db():
         conn = connect(db_path)
@@ -53,6 +54,7 @@ def api_client(tmp_path, monkeypatch):
 
     main.app.dependency_overrides[get_db] = override_db
     monkeypatch.setattr("app.db.get_settings", lambda: settings)
+    main.ATTEMPTS.clear()
     init_db()
 
     client = TestClient(main.app, raise_server_exceptions=False)
@@ -67,6 +69,67 @@ def test_empty_peer_name_returns_readable_422(api_client):
 
     assert response.status_code == 422
     assert response.json() == {"detail": "Peer name is required"}
+
+
+def test_browser_setup_creates_admin_and_login_works(api_client):
+    response = api_client.post(
+        "/api/setup",
+        json={"username": "admin", "password": "correct horse battery", "confirm_password": "correct horse battery"},
+    )
+
+    assert response.status_code == 200
+
+    settings = main.get_settings()
+    with connect(settings.database_path) as conn:
+        row = conn.execute("SELECT username, password_hash FROM admins WHERE username = 'admin'").fetchone()
+    assert row["username"] == "admin"
+    assert row["password_hash"] != "correct horse battery"
+
+    login = api_client.post("/api/login", json={"username": "admin", "password": "correct horse battery"})
+    assert login.status_code == 200
+
+
+def test_setup_disabled_after_admin_exists(api_client):
+    api_client.post(
+        "/api/setup",
+        json={"username": "admin", "password": "correct horse battery", "confirm_password": "correct horse battery"},
+    )
+
+    second = api_client.post(
+        "/api/setup",
+        json={"username": "admin", "password": "another strong password", "confirm_password": "another strong password"},
+    )
+
+    assert second.status_code == 409
+    assert second.json()["detail"] == "Setup is already completed."
+
+
+def test_short_setup_password_rejected(api_client):
+    response = api_client.post(
+        "/api/setup",
+        json={"username": "admin", "password": "short", "confirm_password": "short"},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Password must be at least 12 characters."
+
+
+def test_env_hash_backward_compatibility(tmp_path, monkeypatch):
+    settings = main.Settings(
+        database_path=tmp_path / "wgpanel.db",
+        wg_config_path=tmp_path / "wg0.conf",
+        admin_password_hash=main.hash_password("legacy strong password"),
+        secure_cookies=False,
+    )
+    monkeypatch.setattr(main, "get_settings", lambda: settings)
+    monkeypatch.setattr("app.db.get_settings", lambda: settings)
+    init_db()
+    with connect(settings.database_path) as conn:
+        main.migrate_env_admin(conn, settings)
+        row = conn.execute("SELECT username, password_hash FROM admins").fetchone()
+
+    assert row["username"] == "admin"
+    assert row["password_hash"] == settings.admin_password_hash
 
 
 def test_empty_expires_at_is_accepted(api_client):
@@ -168,6 +231,24 @@ def test_invalid_custom_allowed_ips_is_readable(api_client):
     assert "AllowedIPs" in response.json()["detail"]
 
 
+def test_diagnostics_returns_docker_aware_commands(api_client, monkeypatch):
+    monkeypatch.setattr(main, "running_in_docker", lambda: True)
+    monkeypatch.setattr(main, "run_wg_interfaces", lambda: [])
+    monkeypatch.setattr(main, "run_wg_dump", lambda _interface: (_ for _ in ()).throw(RuntimeError("wg failed")))
+
+    response = api_client.get("/api/diagnostics")
+
+    assert response.status_code == 200
+    commands = [
+        fix["command"]
+        for check in response.json()
+        for fix in check.get("fixes", [])
+    ]
+    assert any("docker compose exec wgpanel" in command for command in commands)
+    assert any("visudo -cf /etc/sudoers.d/wgpanel" in command for command in commands)
+    assert any("mkdir -p" in command and "backups" in command for command in commands)
+
+
 def test_error_responses_are_redacted(api_client, monkeypatch):
     def fail_apply(*args, **kwargs):
         raise RuntimeError("wg failed\nPrivateKey = secret-from-error")
@@ -188,13 +269,14 @@ def test_docker_entrypoint_permission_logic_is_documented():
     assert "mkdir -p /etc/wireguard" in text
     assert "chown root:wgpanel /etc/wireguard" in text
     assert "chmod 750 /etc/wireguard" in text
-    assert "chown root:wgpanel /etc/wireguard/wg0.conf" in text
-    assert "chmod 640 /etc/wireguard/wg0.conf" in text
+    assert 'wg_config="/etc/wireguard/${wg_interface}.conf"' in text
+    assert 'chown root:wgpanel "$wg_config"' in text
+    assert 'chmod 640 "$wg_config"' in text
     assert "chmod 644" not in text
 
 
 def test_backup_listing_redacted_diff_and_restore_confirmation(api_client, tmp_path):
-    settings = main.app.dependency_overrides[main.get_settings]()
+    settings = main.get_settings()
     backup_dir = settings.backup_dir
     backup_dir.mkdir(parents=True, exist_ok=True)
     backup = backup_dir / "wg0.conf.20260101-120000.bak"
@@ -226,9 +308,14 @@ def test_backup_listing_redacted_diff_and_restore_confirmation(api_client, tmp_p
     assert restored.status_code == 200
     assert restored.json()["detail"] == "Backup restored"
 
+    download = api_client.get(f"/api/backups/{backup.name}/download")
+    assert download.status_code == 200
+    assert "backup-secret" not in download.text
+    assert "PrivateKey = <redacted>" in download.text
+
 
 def test_delete_managed_peer_removes_config_and_does_not_reappear_unmanaged(api_client, monkeypatch):
-    settings = main.app.dependency_overrides[main.get_settings]()
+    settings = main.get_settings()
 
     def write_candidate(_helper, _run_dir, config_text, _dry_run, _interface):
         settings.wg_config_path.write_text(config_text, encoding="utf-8")

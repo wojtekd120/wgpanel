@@ -142,7 +142,7 @@ class InterfaceSelectionRequest(BaseModel):
 
 
 class SetupRequest(BaseModel):
-    token: str = Field(min_length=16)
+    token: str | None = Field(default=None, min_length=16)
     username: str = Field(default="admin", min_length=1, max_length=64)
     password: str = Field(min_length=12, max_length=256)
     confirm_password: str = Field(min_length=12, max_length=256)
@@ -150,3 +150,17 @@ class SetupRequest(BaseModel):
 
 class RestoreBackupRequest(BaseModel):
     confirmation: str = Field(min_length=1, max_length=128)
+
+
+class DiagnosticsFix(BaseModel):
+    label: str
+    command: str
+
+
+class DiagnosticsCheck(BaseModel):
+    key: str
+    group: str
+    label: str
+    state: str
+    detail: str
+    fixes: list[DiagnosticsFix] = []
