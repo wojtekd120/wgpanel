@@ -19,7 +19,7 @@ services:
     tmpfs:
       - /run/wgpanel:mode=0750
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:$${WGPANEL_PORT:-8080}/healthz || exit 1"]
+      test: ["CMD-SHELL", "health_host=$${WGPANEL_HOST:-127.0.0.1}; [ \"$$health_host\" = \"0.0.0.0\" ] && health_host=127.0.0.1; curl -fsS http://$$health_host:$${WGPANEL_PORT:-8080}/healthz || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

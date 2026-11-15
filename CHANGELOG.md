@@ -3,6 +3,8 @@
 ## 0.1.7-beta - 2026-11-15
 
 - Fixed ownership of the persistent SQLite backup directory during container startup.
+- Preserved additional prefixes found in active WireGuard runtime during metadata reconciliation.
+- Made the Compose healthcheck follow a non-loopback `WGPANEL_HOST` bind address.
 - Separated server-side peer AllowedIPs from client-export AllowedIPs in the database, API, renderer, and UI.
 - Added migration from existing peer blocks so routed prefixes survive the first post-upgrade apply.
 - Preserved unknown directives and comments in managed peer blocks during config round trips.

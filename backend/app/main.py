@@ -61,6 +61,7 @@ def startup() -> None:
     init_db()
     with connect() as conn:
         migrate_server_allowed_ips_from_config(conn, get_settings())
+        reconcile_server_allowed_ips_from_runtime(conn)
         migrate_env_admin(conn, get_settings())
         if not admin_exists(conn) and not get_settings().admin_password_hash:
             if get_settings().host == "0.0.0.0":
@@ -295,6 +296,43 @@ def migrate_server_allowed_ips_from_config(db: sqlite3.Connection, settings: Set
     if rows:
         db.commit()
     return len(rows)
+
+
+def reconcile_server_allowed_ips_from_runtime(db: sqlite3.Connection) -> int:
+    """Conservatively retain prefixes present in the active WireGuard state."""
+    interfaces = [
+        row["interface_name"]
+        for row in db.execute(
+            "SELECT DISTINCT interface_name FROM peers WHERE managed = 1"
+        ).fetchall()
+    ]
+    updated = 0
+    for interface in interfaces:
+        try:
+            runtime_by_key = {peer.public_key: peer for peer in parse_wg_dump(run_wg_dump(interface))}
+        except Exception:
+            continue
+        rows = db.execute(
+            "SELECT * FROM peers WHERE managed = 1 AND interface_name = ?",
+            (interface,),
+        ).fetchall()
+        for row in rows:
+            runtime = runtime_by_key.get(row["public_key"])
+            if not runtime or not runtime.allowed_ips:
+                continue
+            merged = normalize_server_allowed_ips(
+                server_allowed_ips_for_row(row).split(",") + runtime.allowed_ips
+            )
+            if merged == server_allowed_ips_for_row(row):
+                continue
+            db.execute(
+                "UPDATE peers SET server_allowed_ips = ? WHERE id = ?",
+                (merged, row["id"]),
+            )
+            updated += 1
+    if updated:
+        db.commit()
+    return updated
 
 
 def ensure_assigned_ip_is_allowed(assigned_ip: str, server_allowed_ips: str) -> None:

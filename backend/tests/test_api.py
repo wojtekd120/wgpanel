@@ -433,6 +433,34 @@ def test_legacy_metadata_migration_imports_all_server_allowed_ips(api_client):
     assert row["server_allowed_ips"] == "192.0.2.10/32, 198.51.100.0/24"
 
 
+def test_runtime_reconciliation_retains_prefix_missing_from_database(api_client, monkeypatch):
+    settings = main.get_settings()
+    with connect(settings.database_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO peers (name, public_key, assigned_ip, server_allowed_ips, created_at, interface_name)
+            VALUES ('example-site', ?, '192.0.2.10', '192.0.2.10/32', '2026-01-01T00:00:00+00:00', 'wg0')
+            """,
+            (KEY_B,),
+        )
+        conn.commit()
+        monkeypatch.setattr(
+            main,
+            "run_wg_dump",
+            lambda _interface: "\n".join(
+                [
+                    f"{KEY_A}\t51820\toff\tfwmark",
+                    f"{KEY_B}\t(none)\t(none)\t192.0.2.10/32,198.51.100.0/24\t0\t0\t0\toff",
+                ]
+            ),
+        )
+
+        assert main.reconcile_server_allowed_ips_from_runtime(conn) == 1
+        row = conn.execute("SELECT server_allowed_ips FROM peers WHERE public_key = ?", (KEY_B,)).fetchone()
+
+    assert row["server_allowed_ips"] == "192.0.2.10/32, 198.51.100.0/24"
+
+
 def test_adding_client_does_not_remove_site_peer_extra_prefix(api_client, monkeypatch):
     settings = main.get_settings()
     settings.wg_config_path.write_text(
