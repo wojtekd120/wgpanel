@@ -2,16 +2,18 @@
 
 ## Two different fields
 
-`server_allowed_ips` is WireGuard cryptokey routing on the server. For
-`example-site` it must contain both:
+`server_allowed_ips` is WireGuard cryptokey routing on the server. For an
+example site peer it can contain both:
 
 ```text
 192.0.2.10/32, 198.51.100.0/24
 ```
 
-The host route identifies the peer; the LAN prefix says that the home LAN is
-behind that peer. WGPanel requires the assigned host route and rejects a CIDR
-that overlaps a prefix owned by another managed or unmanaged peer.
+These are RFC 5737 documentation addresses and must be replaced with real
+deployment values. The host route identifies the peer; the LAN prefix says
+that a routed LAN is behind that peer. WGPanel requires the assigned host
+route and rejects a CIDR that overlaps a prefix owned by another managed or
+unmanaged peer.
 
 `client_allowed_ips` is written only to a generated client profile. It decides
 which destinations the client sends into its tunnel, for example a split

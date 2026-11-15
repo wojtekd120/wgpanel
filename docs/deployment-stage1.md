@@ -8,11 +8,13 @@ available. Substitute the actual release directory and timestamp.
 ```bash
 sudo wg show wg0 allowed-ips
 ip -4 route show 198.51.100.0/24
-sudo iptables-nft -t nat -S | grep -E 'NETMAP|192\.168\.(1|99)\.0/24'
+sudo iptables-nft -t nat -S | grep -E 'NETMAP|198\.51\.100\.0/24|203\.0\.113\.0/24'
 docker compose ps
 ```
 
-Record peer counts and identify example-site by its public key. Do not print
+The addresses above are RFC 5737 documentation examples; substitute the
+actual routed LAN and translated subnet. Record peer counts and identify the
+site peer (called `example-site` below) by its public key. Do not print
 `wg0.conf`, because it contains private material.
 
 ## 2. Make explicit pre-upgrade backups
@@ -39,18 +41,18 @@ docker compose logs --tail=100 wgpanel
 
 Starting the container runs the metadata migration. It does not apply a new
 WireGuard config on startup. Inspect the peer in the UI: server-side AllowedIPs
-must show `192.0.2.10/32, 198.51.100.0/24`.
+must show, for example, `192.0.2.10/32, 198.51.100.0/24`.
 
 ## 4. Dry-run and first controlled mutation
 
 Create a preview client first. Verify the redacted diff retains PostUp,
-PostDown, unmanaged peers and both example-site prefixes. Then add one real test
+PostDown, unmanaged peers and both `example-site` prefixes. Then add one real test
 client. Immediately verify:
 
 ```bash
 sudo wg show wg0 allowed-ips
 ip -4 route get 198.51.100.55
-sudo iptables-nft -t nat -S | grep -E 'NETMAP|192\.168\.(1|99)\.0/24'
+sudo iptables-nft -t nat -S | grep -E 'NETMAP|198\.51\.100\.0/24|203\.0\.113\.0/24'
 ```
 
 Compare peer counts with the baseline. Test the existing VPN and home-LAN path

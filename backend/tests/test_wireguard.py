@@ -189,8 +189,8 @@ def test_managed_peer_keeps_multiple_server_allowed_ips_and_unknown_directives()
 
 
 def test_server_allowed_ips_always_include_new_assigned_host_route():
-    assert server_allowed_ips_with_assigned_ip("192.0.2.11", "192.168.50.0/24") == (
-        "192.0.2.11/32, 192.168.50.0/24"
+    assert server_allowed_ips_with_assigned_ip("192.0.2.11", "198.51.100.0/24") == (
+        "192.0.2.11/32, 198.51.100.0/24"
     )
 
 

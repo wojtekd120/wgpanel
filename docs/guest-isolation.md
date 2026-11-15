@@ -50,7 +50,7 @@ First reproduce UFW and Docker ordering in network namespaces or a disposable
 VM. Capture packet counters and test:
 
 * guest to public IPv4 succeeds;
-* guest to `192.0.2.1`, `192.0.2.10`, every private peer, all three LAN
+* guest to the private VPN server, every private peer, every routed LAN
   prefixes, a second guest and administrative ports fails;
 * private peer, VPS host and private LAN cannot initiate to a guest;
 * the VPS public address cannot hairpin to SSH, WGPanel or Docker-published
