@@ -10,9 +10,10 @@ if [ "${1:-}" = "wgpanel-admin" ]; then
   exec wgpanel-admin "$@"
 fi
 
-mkdir -p /var/lib/wgpanel /run/wgpanel
-chown wgpanel:wgpanel /var/lib/wgpanel /run/wgpanel
+mkdir -p /var/lib/wgpanel/backups /run/wgpanel
+chown wgpanel:wgpanel /var/lib/wgpanel /var/lib/wgpanel/backups /run/wgpanel
 chmod 750 /var/lib/wgpanel /run/wgpanel
+chmod 700 /var/lib/wgpanel/backups
 
 mkdir -p /etc/wireguard
 chown root:wgpanel /etc/wireguard

@@ -309,6 +309,9 @@ def test_docker_entrypoint_permission_logic_is_documented():
     assert 'chown root:wgpanel "$wg_config"' in text
     assert 'chmod 640 "$wg_config"' in text
     assert "chmod 644" not in text
+    assert "mkdir -p /var/lib/wgpanel/backups" in text
+    assert "chown wgpanel:wgpanel /var/lib/wgpanel /var/lib/wgpanel/backups /run/wgpanel" in text
+    assert "chmod 700 /var/lib/wgpanel/backups" in text
 
 
 def test_backup_listing_redacted_diff_and_restore_confirmation(api_client, tmp_path):
