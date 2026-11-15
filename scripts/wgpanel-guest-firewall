@@ -1,0 +1,110 @@
+#!/bin/sh
+set -eu
+
+action="${1:-status}"
+config="${WGPANEL_GUEST_FIREWALL_CONFIG:-/etc/wgpanel/guest-firewall.env}"
+table_name="wgpanel_guest"
+
+if [ "$action" != "remove" ] && [ "$action" != "status" ]; then
+    [ -r "$config" ] || { echo "missing $config" >&2; exit 1; }
+    # This file is installed root:root 0600 and contains only shell assignments.
+    . "$config"
+    : "${GUEST_INTERFACE:?missing GUEST_INTERFACE}"
+    : "${PRIVATE_WG_INTERFACE:?missing PRIVATE_WG_INTERFACE}"
+    : "${GUEST_CIDR:?missing GUEST_CIDR}"
+    : "${PUBLIC_UPLINK:?missing PUBLIC_UPLINK}"
+    : "${VPS_PUBLIC_IPV4:?missing VPS_PUBLIC_IPV4}"
+    for interface_name in "$GUEST_INTERFACE" "$PRIVATE_WG_INTERFACE" "$PUBLIC_UPLINK"; do
+        printf '%s\n' "$interface_name" | grep -Eq '^[a-zA-Z0-9_.-]+$' || {
+            echo "invalid interface name" >&2
+            exit 1
+        }
+    done
+fi
+
+render_rules() {
+    output="$1"
+    umask 077
+    cat >"$output" <<EOF
+table inet $table_name {
+    set blocked_v4 {
+        type ipv4_addr
+        flags interval
+        elements = { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.168.0.0/16, 224.0.0.0/4, 240.0.0.0/4 }
+    }
+
+    chain prerouting_guard {
+        type filter hook prerouting priority -295; policy accept;
+        iifname "$GUEST_INTERFACE" meta nfproto ipv6 counter drop comment "WGPanel guest IPv6 fail-closed"
+        iifname "$GUEST_INTERFACE" ip saddr != $GUEST_CIDR counter drop comment "WGPanel guest anti-spoof"
+        iifname "$GUEST_INTERFACE" ip daddr $VPS_PUBLIC_IPV4 counter drop comment "WGPanel block public-IP hairpin before DNAT"
+    }
+
+    chain input_guard {
+        type filter hook input priority -10; policy accept;
+        iifname "$GUEST_INTERFACE" counter drop comment "WGPanel guests cannot access VPS services"
+    }
+
+    chain forward_guard {
+        type filter hook forward priority -10; policy accept;
+        iifname "$GUEST_INTERFACE" oifname "$GUEST_INTERFACE" counter drop comment "WGPanel guest-to-guest"
+        iifname "$GUEST_INTERFACE" oifname "$PRIVATE_WG_INTERFACE" counter drop comment "WGPanel guest-to-private"
+        iifname "$PRIVATE_WG_INTERFACE" oifname "$GUEST_INTERFACE" ct state new counter drop comment "WGPanel private-to-guest"
+        iifname "$GUEST_INTERFACE" ip daddr @blocked_v4 counter drop comment "WGPanel guest blocked destinations"
+        oifname "$GUEST_INTERFACE" ct state established,related counter accept
+        oifname "$GUEST_INTERFACE" ct state new counter drop comment "WGPanel no new inbound guest flows"
+        iifname "$GUEST_INTERFACE" oifname "$PUBLIC_UPLINK" counter accept comment "WGPanel guest internet"
+        iifname "$GUEST_INTERFACE" counter drop comment "WGPanel guest fail-closed fallback"
+    }
+
+    chain output_guard {
+        type filter hook output priority -10; policy accept;
+        oifname "$GUEST_INTERFACE" ct state established,related counter accept
+        oifname "$GUEST_INTERFACE" counter drop comment "WGPanel host cannot initiate to guests"
+    }
+
+    chain postrouting_nat {
+        type nat hook postrouting priority 100; policy accept;
+        iifname "$GUEST_INTERFACE" oifname "$PUBLIC_UPLINK" ip saddr $GUEST_CIDR counter masquerade
+    }
+}
+EOF
+}
+
+case "$action" in
+    render|check|apply)
+        rules="$(mktemp)"
+        batch="$(mktemp)"
+        trap 'rm -f "$rules" "$batch"' EXIT INT TERM
+        render_rules "$rules"
+        if nft list table inet "$table_name" >/dev/null 2>&1; then
+            { echo "delete table inet $table_name"; cat "$rules"; } >"$batch"
+        else
+            cp "$rules" "$batch"
+        fi
+        python3 /usr/local/lib/wgpanel/guest_network_preflight.py \
+            --guest-cidr "$GUEST_CIDR" --guest-interface "$GUEST_INTERFACE" --nft-file "$batch"
+        if [ "$action" = "render" ]; then
+            cat "$batch"
+        elif [ "$action" = "check" ]; then
+            echo "firewall check ok"
+        else
+            [ "$(id -u)" -eq 0 ] || { echo "apply requires root" >&2; exit 1; }
+            nft -f "$batch"
+            echo "guest firewall applied"
+        fi
+        ;;
+    remove)
+        [ "$(id -u)" -eq 0 ] || { echo "remove requires root" >&2; exit 1; }
+        if nft list table inet "$table_name" >/dev/null 2>&1; then
+            nft delete table inet "$table_name"
+        fi
+        ;;
+    status)
+        nft -a list table inet "$table_name"
+        ;;
+    *)
+        echo "usage: $0 {render|check|apply|remove|status}" >&2
+        exit 2
+        ;;
+esac

@@ -1,4 +1,5 @@
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
@@ -12,10 +13,12 @@ CREATE TABLE IF NOT EXISTS peers (
     notes TEXT NOT NULL DEFAULT '',
     public_key TEXT NOT NULL,
     assigned_ip TEXT NOT NULL,
+    server_allowed_ips TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     disabled INTEGER NOT NULL DEFAULT 0,
     expires_at TEXT,
     managed INTEGER NOT NULL DEFAULT 1,
+    peer_type TEXT NOT NULL DEFAULT 'private',
     tunnel_mode TEXT NOT NULL DEFAULT 'split',
     client_allowed_ips TEXT NOT NULL DEFAULT '',
     client_dns TEXT NOT NULL DEFAULT '',
@@ -69,8 +72,21 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+def backup_database(path: Path) -> Path:
+    backup_dir = path.parent / "backups"
+    backup_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+    backup_path = backup_dir / f"{path.name}.{timestamp}.bak"
+    with sqlite3.connect(path) as source, sqlite3.connect(backup_path) as destination:
+        source.backup(destination)
+    backup_path.chmod(0o600)
+    return backup_path
+
+
 def init_db() -> None:
-    with connect() as conn:
+    db_path = get_settings().database_path
+    existed = db_path.exists() and db_path.stat().st_size > 0
+    with connect(db_path) as conn:
         conn.executescript(SCHEMA)
         columns = {row["name"] for row in conn.execute("PRAGMA table_info(peers)").fetchall()}
         migrations = {
@@ -80,7 +96,11 @@ def init_db() -> None:
             "client_allowed_ips": "ALTER TABLE peers ADD COLUMN client_allowed_ips TEXT NOT NULL DEFAULT ''",
             "client_dns": "ALTER TABLE peers ADD COLUMN client_dns TEXT NOT NULL DEFAULT ''",
             "interface_name": f"ALTER TABLE peers ADD COLUMN interface_name TEXT NOT NULL DEFAULT '{get_settings().interface}'",
+            "server_allowed_ips": "ALTER TABLE peers ADD COLUMN server_allowed_ips TEXT NOT NULL DEFAULT ''",
+            "peer_type": "ALTER TABLE peers ADD COLUMN peer_type TEXT NOT NULL DEFAULT 'private'",
         }
+        if existed and any(column not in columns for column in migrations):
+            backup_database(db_path)
         for column, statement in migrations.items():
             if column not in columns:
                 conn.execute(statement)

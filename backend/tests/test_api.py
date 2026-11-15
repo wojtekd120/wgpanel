@@ -42,6 +42,11 @@ def api_client(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "generate_keypair", fake_keypair)
     monkeypatch.setattr(main, "apply_config_with_helper", lambda *args, **kwargs: str(tmp_path / "candidate.conf"))
     monkeypatch.setattr(main, "restore_backup_with_helper", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        main,
+        "read_backup_redacted_with_helper",
+        lambda _helper, _interface, path: main.redact_text(path.read_text(encoding="utf-8")),
+    )
     main.app.dependency_overrides[main.require_auth] = lambda: None
     main.app.dependency_overrides[get_settings] = lambda: settings
     monkeypatch.setattr(main, "get_settings", lambda: settings)
@@ -401,3 +406,134 @@ def test_delete_apply_failure_keeps_metadata(api_client, monkeypatch):
     assert deleted.status_code == 500
     listed = api_client.get("/api/peers").json()
     assert created["public_key"] in {peer["public_key"] for peer in listed}
+
+
+def test_legacy_metadata_migration_imports_all_server_allowed_ips(api_client):
+    settings = main.get_settings()
+    settings.wg_config_path.write_text(
+        settings.wg_config_path.read_text(encoding="utf-8")
+        + f"\n[Peer]\nPublicKey = {KEY_B}\nAllowedIPs = 192.0.2.10/32, 198.51.100.0/24\n",
+        encoding="utf-8",
+    )
+    with connect(settings.database_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO peers (name, public_key, assigned_ip, server_allowed_ips, created_at, interface_name)
+            VALUES ('example-site', ?, '192.0.2.10', '', '2026-01-01T00:00:00+00:00', 'wg0')
+            """,
+            (KEY_B,),
+        )
+        conn.commit()
+        assert main.migrate_server_allowed_ips_from_config(conn, settings) == 1
+        row = conn.execute("SELECT server_allowed_ips FROM peers WHERE public_key = ?", (KEY_B,)).fetchone()
+
+    assert row["server_allowed_ips"] == "192.0.2.10/32, 198.51.100.0/24"
+
+
+def test_adding_client_does_not_remove_site_peer_extra_prefix(api_client, monkeypatch):
+    settings = main.get_settings()
+    settings.wg_config_path.write_text(
+        settings.wg_config_path.read_text(encoding="utf-8")
+        + f"\n[Peer]\nPublicKey = {KEY_B}\nPresharedKey = preserved\nAllowedIPs = 192.0.2.10/32, 198.51.100.0/24\n",
+        encoding="utf-8",
+    )
+    with connect(settings.database_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO peers (name, public_key, assigned_ip, server_allowed_ips, created_at, interface_name)
+            VALUES ('example-site', ?, '192.0.2.10', '192.0.2.10/32, 198.51.100.0/24', '2026-01-01T00:00:00+00:00', 'wg0')
+            """,
+            (KEY_B,),
+        )
+        conn.commit()
+
+    captured = {}
+
+    def capture_candidate(_helper, _run_dir, config_text, _dry_run, _interface):
+        captured["config"] = config_text
+        return str(settings.wg_config_path)
+
+    monkeypatch.setattr(main, "apply_config_with_helper", capture_candidate)
+    response = api_client.post("/api/peers", json={"name": "new client"})
+
+    assert response.status_code == 200
+    assert "AllowedIPs = 192.0.2.10/32, 198.51.100.0/24" in captured["config"]
+    assert "PresharedKey = preserved" in captured["config"]
+
+
+def test_server_allowed_ip_overlap_is_rejected(api_client):
+    first = api_client.post(
+        "/api/peers",
+        json={"name": "site", "server_allowed_ips": "192.168.50.0/24"},
+    )
+    assert first.status_code == 200
+
+    second = api_client.post(
+        "/api/peers",
+        json={"name": "overlap", "server_allowed_ips": "192.168.50.10/32"},
+    )
+
+    assert second.status_code == 409
+    assert "overlap" in second.json()["detail"].lower()
+
+
+def test_update_keeps_server_and_client_allowed_ips_separate(api_client):
+    created = api_client.post("/api/peers", json={"name": "site"}).json()["peer"]
+
+    response = api_client.patch(
+        f"/api/peers/{created['id']}",
+        json={
+            "server_allowed_ips": f"{created['assigned_ip']}/32, 192.168.50.0/24",
+            "tunnel_mode": "custom",
+            "client_allowed_ips": "0.0.0.0/0",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["server_allowed_ips"].endswith("192.168.50.0/24")
+    assert response.json()["client_allowed_ips"] == "0.0.0.0/0"
+
+
+def test_guest_creation_is_disabled_until_profile_is_enabled(api_client):
+    response = api_client.post(
+        "/api/peers?interface=wg1",
+        json={"name": "guest", "peer_type": "guest"},
+    )
+
+    assert response.status_code == 409
+    assert "disabled" in response.json()["detail"].lower()
+
+
+def test_guest_peer_uses_wg1_profile_ipv4_only_and_no_extra_routes(api_client, tmp_path, monkeypatch):
+    settings = main.get_settings()
+    settings.guest_enabled = True
+    settings.guest_interface = "wg1"
+    settings.guest_server_endpoint = "vpn.example.test:51821"
+    settings.guest_server_public_key = KEY_C
+    settings.guest_client_address_pool = "10.10.20.0/24"
+    settings.guest_server_address = "10.10.20.1"
+    wg1_config = tmp_path / "wg1.conf"
+    wg1_config.write_text("[Interface]\nPrivateKey = guest-server-secret\nAddress = 10.10.20.1/24\n", encoding="utf-8")
+    monkeypatch.setattr(main, "config_path_for_selected_interface", lambda _interface: wg1_config)
+
+    response = api_client.post(
+        "/api/peers?interface=wg1",
+        json={"name": "guest", "peer_type": "guest", "tunnel_mode": "custom", "custom_allowed_ips": "::/0"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["peer"]["peer_type"] == "guest"
+    assert body["peer"]["interface_name"] == "wg1"
+    assert body["peer"]["assigned_ip"] == "10.10.20.2"
+    assert body["peer"]["server_allowed_ips"] == "10.10.20.2/32"
+    assert "Endpoint = vpn.example.test:51821" in body["client_config"]
+    assert "AllowedIPs = 0.0.0.0/0" in body["client_config"]
+    assert "::/0" not in body["client_config"]
+
+    rejected = api_client.post(
+        "/api/peers?interface=wg1",
+        json={"name": "router guest", "peer_type": "guest", "server_allowed_ips": "192.168.55.0/24"},
+    )
+    assert rejected.status_code == 422
+    assert "cannot advertise" in rejected.json()["detail"]

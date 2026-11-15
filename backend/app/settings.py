@@ -27,6 +27,13 @@ class Settings(BaseSettings):
     session_cookie_name: str = Field(default="wgpanel_session")
     secure_cookies: bool = Field(default=True)
     admin_password_hash: str = Field(default="")
+    guest_enabled: bool = Field(default=False)
+    guest_interface: str = Field(default="wg1")
+    guest_server_endpoint: str = Field(default="")
+    guest_server_public_key: str = Field(default="")
+    guest_client_address_pool: str = Field(default="10.10.20.0/24")
+    guest_server_address: str = Field(default="10.10.20.1")
+    guest_client_dns: str = Field(default="1.1.1.1")
 
 
 @lru_cache

@@ -1,0 +1,13 @@
+site_name: WGPanel Operations
+site_description: Architecture and safe operations for WGPanel
+theme:
+  name: mkdocs
+nav:
+  - Home: index.md
+  - Architecture: architecture.md
+  - Peer lifecycle and AllowedIPs: peers.md
+  - Routing and NETMAP: routing.md
+  - Guest isolation design: guest-isolation.md
+  - Guest VPN deployment: deployment-guest.md
+  - Stage 1 deployment: deployment-stage1.md
+  - Emergency rollback: rollback.md

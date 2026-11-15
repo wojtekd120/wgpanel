@@ -3,6 +3,7 @@ import argparse
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,9 @@ except ImportError:
     fcntl = None
 
 INTERFACE_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
+SECRET_LINE_RE = re.compile(
+    r"(?im)^(\s*(?:\# wgpanel-disabled )?(?:PrivateKey|PresharedKey)\s*=\s*).*$"
+)
 RUN_DIR = Path("/run/wgpanel")
 BACKUP_DIR = Path("/etc/wireguard/backups")
 LOCK_PATH = Path("/run/wgpanel/apply.lock")
@@ -95,12 +99,12 @@ def create_backup(interface: str) -> None:
     BACKUP_DIR.mkdir(mode=0o750, parents=True, exist_ok=True)
     if grp is not None:
         os.chown(BACKUP_DIR, 0, grp.getgrnam("wgpanel").gr_gid)
-    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S-%f")
     backup_path = BACKUP_DIR / f"{interface}.conf.{timestamp}.bak"
     shutil.copy2(target_config, backup_path)
     if grp is not None:
         os.chown(backup_path, 0, grp.getgrnam("wgpanel").gr_gid)
-    os.chmod(backup_path, 0o640)
+    os.chmod(backup_path, 0o600)
     print(str(backup_path))
 
 
@@ -111,10 +115,25 @@ def self_test() -> None:
     print("wgpanel-helper self-test ok")
 
 
+def read_redacted_backup(interface: str, backup_path: Path) -> None:
+    if os.geteuid() != 0:
+        fail("helper must run as root")
+    validate_interface(interface)
+    text = backup_path.read_text(encoding="utf-8")
+    sys.stdout.write(SECRET_LINE_RE.sub(r"\1<redacted>", text))
+
+
 def _apply_locked(interface: str, config_path: Path) -> None:
     target_config = config_path_for_interface(interface)
     with tempfile.NamedTemporaryFile("w", prefix="wgpanel.strip.", suffix=".conf", delete=False) as stripped:
         stripped_path = Path(stripped.name)
+    with tempfile.NamedTemporaryFile("w", prefix="wgpanel.runtime.", suffix=".conf", delete=False) as runtime:
+        runtime_path = Path(runtime.name)
+    target_config.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        "wb", prefix=f".{interface}.", suffix=".tmp", dir=target_config.parent, delete=False
+    ) as staged:
+        staged_path = Path(staged.name)
 
     try:
         stripped_data = subprocess.run(
@@ -127,16 +146,32 @@ def _apply_locked(interface: str, config_path: Path) -> None:
         stripped_path.write_text(stripped_data, encoding="utf-8")
         os.chmod(stripped_path, 0o600)
 
+        runtime_data = subprocess.run(
+            ["wg", "showconf", interface],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout
+        runtime_path.write_text(runtime_data, encoding="utf-8")
+        os.chmod(runtime_path, 0o600)
+
         BACKUP_DIR.mkdir(mode=0o750, parents=True, exist_ok=True)
         if grp is not None:
             os.chown(BACKUP_DIR, 0, grp.getgrnam("wgpanel").gr_gid)
         if target_config.exists():
-            timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+            timestamp = datetime.utcnow().strftime("%Y%m%d-%H%M%S-%f")
             backup_path = BACKUP_DIR / f"{interface}.conf.{timestamp}.bak"
             shutil.copy2(target_config, backup_path)
             if grp is not None:
                 os.chown(backup_path, 0, grp.getgrnam("wgpanel").gr_gid)
-            os.chmod(backup_path, 0o640)
+            os.chmod(backup_path, 0o600)
+
+        shutil.copyfile(config_path, staged_path)
+        target_mode = stat.S_IMODE(target_config.stat().st_mode) if target_config.exists() else 0o600
+        if grp is not None:
+            os.chown(staged_path, 0, grp.getgrnam("wgpanel").gr_gid)
+        os.chmod(staged_path, target_mode)
 
         subprocess.run(
             ["wg", "syncconf", interface, str(stripped_path)],
@@ -145,12 +180,21 @@ def _apply_locked(interface: str, config_path: Path) -> None:
             text=True,
             timeout=15,
         )
-        shutil.copy2(config_path, target_config)
-        if grp is not None:
-            os.chown(target_config, 0, grp.getgrnam("wgpanel").gr_gid)
-        os.chmod(target_config, 0o640)
+        try:
+            os.replace(staged_path, target_config)
+        except Exception:
+            subprocess.run(
+                ["wg", "syncconf", interface, str(runtime_path)],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            raise
     finally:
         stripped_path.unlink(missing_ok=True)
+        runtime_path.unlink(missing_ok=True)
+        staged_path.unlink(missing_ok=True)
 
 
 def main() -> None:
@@ -164,6 +208,9 @@ def main() -> None:
     restore_parser.add_argument("--backup", required=True)
     backup_parser = sub.add_parser("backup")
     backup_parser.add_argument("--interface", required=True)
+    read_parser = sub.add_parser("read-redacted")
+    read_parser.add_argument("--interface", required=True)
+    read_parser.add_argument("--backup", required=True)
     sub.add_parser("self-test")
     args = parser.parse_args()
 
@@ -173,6 +220,8 @@ def main() -> None:
         restore(args.interface, validate_backup_path(args.backup, args.interface))
     elif args.command == "backup":
         create_backup(args.interface)
+    elif args.command == "read-redacted":
+        read_redacted_backup(args.interface, validate_backup_path(args.backup, args.interface))
     elif args.command == "self-test":
         self_test()
 

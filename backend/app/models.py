@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field, field_validator
 
 
 VALID_TUNNEL_MODES = {"split", "full", "custom"}
+VALID_PEER_TYPES = {"private", "guest"}
 
 
 class LoginRequest(BaseModel):
@@ -13,10 +14,12 @@ class LoginRequest(BaseModel):
 
 class CreatePeerRequest(BaseModel):
     name: str = Field(min_length=1, max_length=64)
+    peer_type: str = "private"
     expires_at: datetime | None = None
     dry_run: bool = False
     tunnel_mode: str = "split"
     custom_allowed_ips: str | None = None
+    server_allowed_ips: str | None = Field(default=None, max_length=4000)
     client_dns: str | None = None
 
     @field_validator("name")
@@ -40,11 +43,22 @@ class CreatePeerRequest(BaseModel):
             raise ValueError("Invalid tunnel mode")
         return value
 
+    @field_validator("peer_type")
+    @classmethod
+    def peer_type_valid(cls, value: str) -> str:
+        if value not in VALID_PEER_TYPES:
+            raise ValueError("Invalid peer type")
+        return value
+
 
 class UpdatePeerRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=64)
     notes: str | None = Field(default=None, max_length=2000)
     expires_at: datetime | None = None
+    server_allowed_ips: str | None = Field(default=None, max_length=4000)
+    tunnel_mode: str | None = None
+    client_allowed_ips: str | None = Field(default=None, max_length=4000)
+    client_dns: str | None = Field(default=None, max_length=512)
 
     @field_validator("name")
     @classmethod
@@ -60,6 +74,13 @@ class UpdatePeerRequest(BaseModel):
             return None
         return value
 
+    @field_validator("tunnel_mode")
+    @classmethod
+    def optional_tunnel_mode_valid(cls, value: str | None) -> str | None:
+        if value is not None and value not in VALID_TUNNEL_MODES:
+            raise ValueError("Invalid tunnel mode")
+        return value
+
 
 class Peer(BaseModel):
     id: int
@@ -67,10 +88,12 @@ class Peer(BaseModel):
     notes: str
     public_key: str
     assigned_ip: str
+    server_allowed_ips: str = ""
     created_at: datetime
     disabled: bool
     expires_at: datetime | None
     managed: bool = True
+    peer_type: str = "private"
     tunnel_mode: str = "split"
     client_allowed_ips: str = ""
     client_dns: str = ""

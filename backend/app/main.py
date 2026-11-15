@@ -15,8 +15,9 @@ from fastapi.requests import Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config_apply import apply_config_with_helper, create_backup_with_helper, restore_backup_with_helper
+from .config_apply import apply_config_with_helper, create_backup_with_helper, read_backup_redacted_with_helper, restore_backup_with_helper
 from .db import connect, get_db, init_db
+from .guest import InterfaceProfile, interface_profile, profile_for_interface
 from .models import ConfigDiffRequest, CreatePeerRequest, CreatePeerResponse, Dashboard, DiagnosticsCheck, InterfaceSelectionRequest, LoginRequest, OnboardingCheck, Peer, RestoreBackupRequest, SetupRequest, TakeOwnershipRequest, UpdatePeerRequest, WgPeerStatus
 from .redaction import redact, redact_text
 from .security import hash_password, new_session_token, new_setup_token, session_expiry, setup_expiry, token_digest, utcnow, verify_password
@@ -24,6 +25,7 @@ from .settings import Settings, get_settings
 from .validators import validate_peer_name
 from .wireguard import (
     allocate_next_ip,
+    allowed_ip_conflicts,
     generate_keypair,
     config_path_for_interface,
     parse_config_peer_blocks,
@@ -34,6 +36,8 @@ from .wireguard import (
     run_wg_dump,
     run_wg_interfaces,
     unmanaged_used_ips,
+    normalize_server_allowed_ips,
+    server_allowed_ips_with_assigned_ip,
     validate_allowed_ips,
     validate_interface_name,
     handshake_activity_status,
@@ -56,6 +60,7 @@ ATTEMPTS: dict[str, list[datetime]] = {}
 def startup() -> None:
     init_db()
     with connect() as conn:
+        migrate_server_allowed_ips_from_config(conn, get_settings())
         migrate_env_admin(conn, get_settings())
         if not admin_exists(conn) and not get_settings().admin_password_hash:
             if get_settings().host == "0.0.0.0":
@@ -76,8 +81,10 @@ def validation_exception_handler(request: Request, exc: RequestValidationError) 
             return JSONResponse(status_code=422, content={"detail": "Invalid expiration date"})
         if field in {"password", "confirm_password"} and "12" in message:
             return JSONResponse(status_code=422, content={"detail": "Password must be at least 12 characters."})
-        if field in {"custom_allowed_ips", "tunnel_mode"}:
+        if field in {"custom_allowed_ips", "server_allowed_ips", "tunnel_mode"}:
             return JSONResponse(status_code=422, content={"detail": "Invalid AllowedIPs"})
+        if field == "peer_type":
+            return JSONResponse(status_code=422, content={"detail": "Invalid peer type"})
         if error_type == "missing":
             return JSONResponse(status_code=422, content={"detail": "Missing required field"})
         return JSONResponse(status_code=422, content={"detail": redact_text(message.replace("Value error, ", ""))})
@@ -216,10 +223,12 @@ def row_to_peer(row: sqlite3.Row) -> Peer:
         notes=row["notes"] if "notes" in row.keys() else "",
         public_key=row["public_key"],
         assigned_ip=row["assigned_ip"],
+        server_allowed_ips=server_allowed_ips_for_row(row),
         created_at=datetime.fromisoformat(row["created_at"]),
         disabled=bool(row["disabled"]),
         expires_at=expires_at,
         managed=bool(row["managed"]) if "managed" in row.keys() else True,
+        peer_type=row["peer_type"] if "peer_type" in row.keys() else "private",
         tunnel_mode=row["tunnel_mode"] if "tunnel_mode" in row.keys() else "split",
         client_allowed_ips=row["client_allowed_ips"] if "client_allowed_ips" in row.keys() else "",
         client_dns=row["client_dns"] if "client_dns" in row.keys() else "",
@@ -238,10 +247,12 @@ def unmanaged_peer_from_block(index: int, block, interface: str) -> Peer:
         notes="Existing peer preserved from wg0.conf",
         public_key=block.public_key or "",
         assigned_ip=assigned_ip,
+        server_allowed_ips=", ".join(block.allowed_ips),
         created_at=utcnow(),
         disabled=False,
         expires_at=None,
         managed=False,
+        peer_type="guest" if interface == get_settings().guest_interface else "private",
         tunnel_mode="unknown",
         client_allowed_ips="",
         client_dns="",
@@ -254,6 +265,81 @@ def managed_public_keys_for_interface(db: sqlite3.Connection, interface: str) ->
     rows = db.execute("SELECT public_key FROM peers WHERE managed = 1 AND interface_name = ?", (interface,)).fetchall()
     deleted = db.execute("SELECT public_key FROM deleted_peers WHERE interface_name = ?", (interface,)).fetchall()
     return {row["public_key"] for row in rows} | {row["public_key"] for row in deleted}
+
+
+def server_allowed_ips_for_row(row: sqlite3.Row | dict) -> str:
+    keys = row.keys()
+    if "server_allowed_ips" in keys and row["server_allowed_ips"]:
+        return normalize_server_allowed_ips(row["server_allowed_ips"])
+    return server_allowed_ips_with_assigned_ip(row["assigned_ip"])
+
+
+def migrate_server_allowed_ips_from_config(db: sqlite3.Connection, settings: Settings) -> int:
+    """One-way metadata migration; never writes or applies WireGuard config."""
+    rows = db.execute(
+        "SELECT * FROM peers WHERE managed = 1 AND (server_allowed_ips IS NULL OR server_allowed_ips = '')"
+    ).fetchall()
+    by_interface: dict[str, dict[str, object]] = {}
+    for row in rows:
+        interface = row["interface_name"]
+        if interface not in by_interface:
+            path = settings.wg_config_path if interface == settings.interface else config_path_for_selected_interface(interface)
+            blocks = parse_config_peer_blocks(read_config(path)) if path.exists() else []
+            by_interface[interface] = {block.public_key: block for block in blocks if block.public_key}
+        block = by_interface[interface].get(row["public_key"])
+        allowed_ips = block.allowed_ips if block and block.allowed_ips else [server_allowed_ips_with_assigned_ip(row["assigned_ip"])]
+        db.execute(
+            "UPDATE peers SET server_allowed_ips = ? WHERE id = ?",
+            (normalize_server_allowed_ips(allowed_ips), row["id"]),
+        )
+    if rows:
+        db.commit()
+    return len(rows)
+
+
+def ensure_assigned_ip_is_allowed(assigned_ip: str, server_allowed_ips: str) -> None:
+    required = server_allowed_ips_with_assigned_ip(assigned_ip)
+    normalized = normalize_server_allowed_ips(server_allowed_ips)
+    if required not in normalized.split(", "):
+        raise HTTPException(
+            status_code=422,
+            detail=f"Server-side AllowedIPs must include the assigned tunnel address {required}",
+        )
+
+
+def reject_server_allowed_ip_conflicts(
+    db: sqlite3.Connection,
+    interface: str,
+    current_config: str,
+    candidate_public_key: str,
+    candidate_name: str,
+    candidate_allowed_ips: str,
+) -> None:
+    managed_rows = db.execute(
+        "SELECT * FROM peers WHERE managed = 1 AND interface_name = ? AND public_key != ?",
+        (interface, candidate_public_key),
+    ).fetchall()
+    peers = [
+        (row["public_key"], row["name"], server_allowed_ips_for_row(row))
+        for row in managed_rows
+    ]
+    known_keys = managed_public_keys_for_interface(db, interface) | {candidate_public_key}
+    for index, block in enumerate(parse_config_peer_blocks(current_config)):
+        if block.public_key and block.public_key not in known_keys and block.allowed_ips:
+            peers.append((block.public_key, f"unmanaged peer #{index + 1}", ", ".join(block.allowed_ips)))
+    peers.append((candidate_public_key, candidate_name, candidate_allowed_ips))
+    conflicts = allowed_ip_conflicts(peers)
+    involving_candidate = [item for item in conflicts if candidate_public_key in (item[0], item[2])]
+    if involving_candidate:
+        left_key, left_prefix, right_key, right_prefix = involving_candidate[0]
+        names = {key: name for key, name, _allowed in peers}
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Server-side AllowedIPs conflict: {left_prefix} ({names[left_key]}) overlaps "
+                f"{right_prefix} ({names[right_key]}). Each prefix must route to only one peer."
+            ),
+        )
 
 
 def running_in_docker() -> bool:
@@ -327,6 +413,10 @@ def interfaces() -> dict[str, list[dict[str, object]]]:
     except Exception:
         pass
     names.update(path.stem for path in Path("/etc/wireguard").glob("*.conf"))
+    settings = get_settings()
+    names.add(settings.interface)
+    if settings.guest_enabled:
+        names.add(settings.guest_interface)
     rows = []
     for name in sorted(names):
         try:
@@ -335,6 +425,19 @@ def interfaces() -> dict[str, list[dict[str, object]]]:
             continue
         rows.append({"name": name, "config_exists": config_path_for_selected_interface(name).exists()})
     return {"interfaces": rows}
+
+
+@app.get("/api/peer-profiles", dependencies=[Depends(require_auth)])
+def peer_profiles(settings: Settings = Depends(get_settings)) -> dict[str, object]:
+    return {
+        "private": {"enabled": True, "interface": settings.interface},
+        "guest": {
+            "enabled": settings.guest_enabled,
+            "interface": settings.guest_interface,
+            "pool": settings.guest_client_address_pool,
+            "ipv6_enabled": False,
+        },
+    }
 
 
 @app.get("/api/settings/interface", dependencies=[Depends(require_auth)])
@@ -412,11 +515,12 @@ def dashboard(
     except Exception:
         peers = []
         up = False
+    profile = profile_for_interface(settings, interface)
     return Dashboard(
         interface=interface,
         up=up,
-        client_address_pool=settings.client_address_pool,
-        server_address=settings.server_address,
+        client_address_pool=profile.client_address_pool,
+        server_address=profile.server_address,
         peers=[
             WgPeerStatus(
                 public_key=p.public_key,
@@ -598,9 +702,11 @@ def list_peers(
     return managed + unmanaged
 
 
-def client_allowed_ips_for_request(payload: CreatePeerRequest, settings: Settings) -> str:
+def client_allowed_ips_for_request(payload: CreatePeerRequest, profile: InterfaceProfile) -> str:
+    if profile.peer_type == "guest":
+        return profile.client_allowed_ips
     if payload.tunnel_mode == "split":
-        return settings.client_address_pool
+        return profile.client_address_pool
     if payload.tunnel_mode == "full":
         return "0.0.0.0/0, ::/0"
     try:
@@ -617,7 +723,18 @@ def create_peer(
     db: sqlite3.Connection = Depends(get_db),
 ) -> CreatePeerResponse:
     name = validate_peer_name(payload.name)
-    if not settings.server_public_key:
+    try:
+        profile = interface_profile(settings, payload.peer_type)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if interface != profile.interface:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"{payload.peer_type.title()} peers must be created on {profile.interface}, not {interface}."
+            ),
+        )
+    if not profile.server_public_key:
         raise HTTPException(status_code=503, detail="Server public key is not configured")
 
     private_key, public_key = generate_keypair()
@@ -626,65 +743,89 @@ def create_peer(
     used_ips = {row["assigned_ip"] for row in db.execute("SELECT assigned_ip FROM peers WHERE interface_name = ?", (interface,)).fetchall()}
     used_ips |= unmanaged_used_ips(current_config, managed_keys)
     try:
-        assigned_ip = allocate_next_ip(settings.client_address_pool, used_ips, settings.server_address)
+        assigned_ip = allocate_next_ip(profile.client_address_pool, used_ips, profile.server_address)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     now = utcnow()
-    client_allowed_ips = client_allowed_ips_for_request(payload, settings)
-    client_dns = payload.client_dns or settings.client_dns
+    client_allowed_ips = client_allowed_ips_for_request(payload, profile)
+    client_dns = profile.client_dns if profile.peer_type == "guest" else (payload.client_dns or profile.client_dns)
+    tunnel_mode = "full" if profile.peer_type == "guest" else payload.tunnel_mode
+    try:
+        server_allowed_ips = server_allowed_ips_with_assigned_ip(assigned_ip, payload.server_allowed_ips)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if profile.peer_type == "guest" and payload.server_allowed_ips:
+        raise HTTPException(status_code=422, detail="Guest peers cannot advertise additional server-side networks")
+    reject_server_allowed_ip_conflicts(
+        db,
+        interface,
+        current_config,
+        public_key,
+        name,
+        server_allowed_ips,
+    )
     existing_rows = db.execute(
-        "SELECT name, public_key, assigned_ip, disabled FROM peers WHERE managed = 1 AND interface_name = ? ORDER BY created_at",
+        "SELECT * FROM peers WHERE managed = 1 AND interface_name = ? ORDER BY created_at",
         (interface,),
     ).fetchall()
-    preview_peers = [(row["name"], row["public_key"], row["assigned_ip"], bool(row["disabled"])) for row in existing_rows]
-    preview_peers.append((name, public_key, assigned_ip, False))
+    preview_peers = [(row["name"], row["public_key"], server_allowed_ips_for_row(row), bool(row["disabled"])) for row in existing_rows]
+    preview_peers.append((name, public_key, server_allowed_ips, False))
     server_config_preview = render_config_with_managed_keys(current_config, preview_peers, managed_keys | {public_key})
-    apply_config_with_helper(settings.helper_path, settings.run_dir, server_config_preview, payload.dry_run, interface)
 
     if payload.dry_run:
+        apply_config_with_helper(settings.helper_path, settings.run_dir, server_config_preview, True, interface)
         row = {
             "id": 0,
             "name": name,
             "notes": "",
             "public_key": public_key,
             "assigned_ip": assigned_ip,
+            "server_allowed_ips": server_allowed_ips,
             "created_at": now.isoformat(),
             "disabled": 0,
             "expires_at": payload.expires_at.isoformat() if payload.expires_at else None,
             "managed": 1,
-            "tunnel_mode": payload.tunnel_mode,
+            "peer_type": profile.peer_type,
+            "tunnel_mode": tunnel_mode,
             "client_allowed_ips": client_allowed_ips,
             "client_dns": client_dns,
             "interface_name": interface,
         }
     else:
-        db.execute("DELETE FROM deleted_peers WHERE interface_name = ? AND public_key = ?", (interface, public_key))
-        db.execute(
-            """
-        INSERT INTO peers (name, notes, public_key, assigned_ip, created_at, disabled, expires_at, managed, tunnel_mode, client_allowed_ips, client_dns, interface_name)
-        VALUES (?, '', ?, ?, ?, 0, ?, 1, ?, ?, ?, ?)
-            """,
-            (
-                name,
-                public_key,
-                assigned_ip,
-                now.isoformat(),
-                payload.expires_at.isoformat() if payload.expires_at else None,
-                payload.tunnel_mode,
-                client_allowed_ips,
-                client_dns,
-                interface,
-            ),
-        )
-        db.commit()
+        try:
+            db.execute("DELETE FROM deleted_peers WHERE interface_name = ? AND public_key = ?", (interface, public_key))
+            db.execute(
+                """
+            INSERT INTO peers (name, notes, public_key, assigned_ip, server_allowed_ips, created_at, disabled, expires_at, managed, peer_type, tunnel_mode, client_allowed_ips, client_dns, interface_name)
+            VALUES (?, '', ?, ?, ?, ?, 0, ?, 1, ?, ?, ?, ?, ?)
+                """,
+                (
+                    name,
+                    public_key,
+                    assigned_ip,
+                    server_allowed_ips,
+                    now.isoformat(),
+                    payload.expires_at.isoformat() if payload.expires_at else None,
+                    profile.peer_type,
+                    tunnel_mode,
+                    client_allowed_ips,
+                    client_dns,
+                    interface,
+                ),
+            )
+            apply_config_with_helper(settings.helper_path, settings.run_dir, server_config_preview, False, interface)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
         row = db.execute("SELECT * FROM peers WHERE public_key = ?", (public_key,)).fetchone()
 
     client_config = render_client_config(
         private_key,
         assigned_ip,
-        settings.server_public_key,
-        settings.server_endpoint,
+        profile.server_public_key,
+        profile.server_endpoint,
         client_dns,
         client_allowed_ips,
     )
@@ -699,11 +840,13 @@ def create_peer(
             notes=row["notes"] if "notes" in row.keys() else "",
             public_key=row["public_key"],
             assigned_ip=row["assigned_ip"],
+            server_allowed_ips=server_allowed_ips_for_row(row),
             created_at=datetime.fromisoformat(row["created_at"]),
             disabled=bool(row["disabled"]),
             expires_at=datetime.fromisoformat(row["expires_at"]) if row["expires_at"] else None,
             managed=bool(row["managed"]) if "managed" in row.keys() else True,
-            tunnel_mode=row["tunnel_mode"] if "tunnel_mode" in row.keys() else payload.tunnel_mode,
+            peer_type=row["peer_type"] if "peer_type" in row.keys() else profile.peer_type,
+            tunnel_mode=row["tunnel_mode"] if "tunnel_mode" in row.keys() else tunnel_mode,
             client_allowed_ips=row["client_allowed_ips"] if "client_allowed_ips" in row.keys() else client_allowed_ips,
             client_dns=row["client_dns"] if "client_dns" in row.keys() else client_dns,
             status="Active",
@@ -718,10 +861,10 @@ def create_peer(
 
 def apply_db_config(settings: Settings, db: sqlite3.Connection, dry_run: bool = False, interface: str = "wg0") -> str:
     rows = db.execute(
-        "SELECT name, public_key, assigned_ip, disabled FROM peers WHERE managed = 1 AND interface_name = ? ORDER BY created_at",
+        "SELECT * FROM peers WHERE managed = 1 AND interface_name = ? ORDER BY created_at",
         (interface,),
     ).fetchall()
-    peers = [(row["name"], row["public_key"], row["assigned_ip"], bool(row["disabled"])) for row in rows]
+    peers = [(row["name"], row["public_key"], server_allowed_ips_for_row(row), bool(row["disabled"])) for row in rows]
     next_config = render_config_with_managed_keys(
         read_current_config(interface, settings),
         peers,
@@ -748,6 +891,16 @@ def set_peer_disabled(
     row = db.execute("SELECT * FROM peers WHERE id = ? AND managed = 1 AND interface_name = ?", (peer_id, interface)).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="Managed peer not found")
+    if not disabled:
+        current_config = read_current_config(interface, settings)
+        reject_server_allowed_ip_conflicts(
+            db,
+            interface,
+            current_config,
+            row["public_key"],
+            row["name"],
+            server_allowed_ips_for_row(row),
+        )
     db.execute("UPDATE peers SET disabled = ? WHERE id = ?", (1 if disabled else 0, peer_id))
     apply_db_config(settings, db, interface=interface)
     db.commit()
@@ -801,18 +954,23 @@ def take_ownership(
     if not block:
         raise HTTPException(status_code=404, detail="Unmanaged peer not found")
     assigned_ip = block.allowed_ips[0].split("/", 1)[0] if block.allowed_ips else ""
+    if not assigned_ip:
+        raise HTTPException(status_code=422, detail="Peer has no server-side AllowedIPs to import")
+    server_allowed_ips = normalize_server_allowed_ips(block.allowed_ips)
     db.execute(
         """
-        INSERT INTO peers (name, notes, public_key, assigned_ip, created_at, disabled, expires_at, managed, interface_name)
-        VALUES (?, ?, ?, ?, ?, 0, ?, 1, ?)
+        INSERT INTO peers (name, notes, public_key, assigned_ip, server_allowed_ips, created_at, disabled, expires_at, managed, peer_type, interface_name)
+        VALUES (?, ?, ?, ?, ?, ?, 0, ?, 1, ?, ?)
         """,
         (
             validate_peer_name(payload.name),
             payload.notes,
             public_key,
             assigned_ip,
+            server_allowed_ips,
             utcnow().isoformat(),
             payload.expires_at.isoformat() if payload.expires_at else None,
+            "guest" if interface == settings.guest_interface else "private",
             interface,
         ),
     )
@@ -837,12 +995,56 @@ def update_peer(
     expires_at = payload.expires_at.isoformat() if payload.expires_at else None
     if payload.expires_at is None and "expires_at" not in payload.model_fields_set:
         expires_at = row["expires_at"]
-    db.execute(
-        "UPDATE peers SET name = ?, notes = ?, expires_at = ? WHERE id = ?",
-        (name, notes, expires_at, peer_id),
-    )
-    apply_db_config(settings, db, interface=interface)
-    db.commit()
+    server_allowed_ips = server_allowed_ips_for_row(row)
+    if "server_allowed_ips" in payload.model_fields_set:
+        try:
+            server_allowed_ips = normalize_server_allowed_ips(payload.server_allowed_ips or "")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        ensure_assigned_ip_is_allowed(row["assigned_ip"], server_allowed_ips)
+        if row["peer_type"] == "guest" and server_allowed_ips != server_allowed_ips_with_assigned_ip(row["assigned_ip"]):
+            raise HTTPException(status_code=422, detail="Guest peers may only use their assigned /32 on the server")
+        reject_server_allowed_ip_conflicts(
+            db,
+            interface,
+            read_current_config(interface, settings),
+            row["public_key"],
+            name,
+            server_allowed_ips,
+        )
+    tunnel_mode = payload.tunnel_mode if payload.tunnel_mode is not None else row["tunnel_mode"]
+    client_allowed_ips = row["client_allowed_ips"]
+    if "client_allowed_ips" in payload.model_fields_set:
+        try:
+            client_allowed_ips = validate_allowed_ips(payload.client_allowed_ips or "")
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+    elif payload.tunnel_mode is not None:
+        if tunnel_mode == "split":
+            client_allowed_ips = settings.client_address_pool
+        elif tunnel_mode == "full":
+            client_allowed_ips = "0.0.0.0/0, ::/0"
+    client_dns = payload.client_dns if payload.client_dns is not None else row["client_dns"]
+    if row["peer_type"] == "guest":
+        guest_profile = interface_profile(settings, "guest")
+        tunnel_mode = "full"
+        client_allowed_ips = "0.0.0.0/0"
+        client_dns = guest_profile.client_dns
+    try:
+        db.execute(
+            """
+            UPDATE peers
+            SET name = ?, notes = ?, expires_at = ?, server_allowed_ips = ?,
+                tunnel_mode = ?, client_allowed_ips = ?, client_dns = ?
+            WHERE id = ?
+            """,
+            (name, notes, expires_at, server_allowed_ips, tunnel_mode, client_allowed_ips, client_dns, peer_id),
+        )
+        apply_db_config(settings, db, interface=interface)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
     return row_to_peer(db.execute("SELECT * FROM peers WHERE id = ?", (peer_id,)).fetchone())
 
 
@@ -928,7 +1130,7 @@ def backup_diff(
 ) -> dict[str, str]:
     backup_path = backup_path_from_name(settings, interface, backup_name)
     current = redact_private_keys(read_current_config(interface, settings))
-    backup = redact_private_keys(backup_path.read_text(encoding="utf-8"))
+    backup = read_backup_redacted_with_helper(settings.helper_path, interface, backup_path)
     diff = "\n".join(
         difflib.unified_diff(
             current.splitlines(),
@@ -957,7 +1159,7 @@ def download_backup(
     settings: Settings = Depends(get_settings),
 ) -> Response:
     backup_path = backup_path_from_name(settings, interface, backup_name)
-    redacted = redact_private_keys(backup_path.read_text(encoding="utf-8"))
+    redacted = read_backup_redacted_with_helper(settings.helper_path, interface, backup_path)
     return Response(
         content=redacted,
         media_type="text/plain",

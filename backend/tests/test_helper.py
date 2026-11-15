@@ -79,3 +79,23 @@ def test_helper_self_test_does_not_modify_config_or_backup_dirs(tmp_path, monkey
     assert "self-test ok" in capsys.readouterr().out
     assert not run_dir.exists()
     assert not backup_dir.exists()
+
+
+def test_helper_only_exposes_redacted_backup(tmp_path, monkeypatch, capsys):
+    helper = load_helper()
+    backup = tmp_path / "wg0.conf.test.bak"
+    backup.write_text(
+        "[Interface]\nPrivateKey = server-secret\n[Peer]\nPresharedKey = peer-secret\n"
+        "# wgpanel-disabled PresharedKey = disabled-peer-secret\nPublicKey = public\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(helper.os, "geteuid", lambda: 0, raising=False)
+
+    helper.read_redacted_backup("wg0", backup)
+
+    output = capsys.readouterr().out
+    assert "server-secret" not in output
+    assert "peer-secret" not in output
+    assert "disabled-peer-secret" not in output
+    assert output.count("<redacted>") == 3
+    assert "PublicKey = public" in output

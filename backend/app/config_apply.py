@@ -17,7 +17,7 @@ def apply_config_with_helper(helper_path: Path, run_dir: Path, config_text: str,
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 handle.write(config_text)
-            os.chmod(temp_path, 0o640)
+            os.chmod(temp_path, 0o600)
             if dry_run:
                 return str(temp_path)
             try:
@@ -60,3 +60,17 @@ def create_backup_with_helper(helper_path: Path, interface: str) -> None:
         )
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(redact_text(exc.stderr or exc.stdout or "WireGuard backup failed")) from exc
+
+
+def read_backup_redacted_with_helper(helper_path: Path, interface: str, backup_path: Path) -> str:
+    try:
+        result = subprocess.run(
+            ["sudo", str(helper_path), "read-redacted", "--interface", interface, "--backup", str(backup_path)],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        return result.stdout
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError(redact_text(exc.stderr or "WireGuard backup read failed")) from exc

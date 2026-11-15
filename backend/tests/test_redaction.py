@@ -33,3 +33,16 @@ def test_redacts_nested_error_payloads():
 
     assert "client-secret" not in str(redacted)
     assert "pbkdf2_sha256" not in str(redacted)
+
+
+def test_redacts_preshared_keys_in_active_and_disabled_peer_blocks():
+    text = (
+        "PresharedKey = active-secret\n"
+        "# wgpanel-disabled PresharedKey = disabled-secret\n"
+    )
+
+    redacted = redact_text(text)
+
+    assert "active-secret" not in redacted
+    assert "disabled-secret" not in redacted
+    assert redacted.count("<redacted>") == 2

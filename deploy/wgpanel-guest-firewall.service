@@ -1,0 +1,15 @@
+[Unit]
+Description=WGPanel guest VPN fail-closed firewall
+Wants=network-online.target
+After=network-online.target nftables.service
+Before=wg-quick@wg1.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=WGPANEL_GUEST_FIREWALL_CONFIG=/etc/wgpanel/guest-firewall.env
+ExecStart=/usr/local/sbin/wgpanel-guest-firewall apply
+ExecReload=/usr/local/sbin/wgpanel-guest-firewall apply
+
+[Install]
+WantedBy=multi-user.target

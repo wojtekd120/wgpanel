@@ -1,6 +1,6 @@
 # WGPanel
 
-**Version:** `0.1.6-beta`
+**Version:** `0.1.7-beta`
 
 WGPanel is a self-hosted web UI for managing WireGuard peers.
 
@@ -27,7 +27,8 @@ WGPanel is designed to preserve existing WireGuard peers. Existing peers are sho
 - Shows generated client config and QR code once.
 - Enables, disables, deletes, and edits metadata for managed peers.
 - Preserves unmanaged existing peers.
-- Supports multiple interfaces such as `wg0`, `wg1`, `wg-test`, and `homevpn`.
+- Inspects and manages existing metadata on multiple interfaces such as `wg0` and `wg1`.
+- Creates new peers only on the configured primary interface until explicit per-interface endpoint/key/pool profiles are implemented.
 - Creates backups before applying config changes.
 
 ## What WGPanel Does Not Do
@@ -124,7 +125,7 @@ sudo mkdir -p /root/wgpanel-backups
 sudo cp /etc/wireguard/wg0.conf /root/wgpanel-backups/wg0.conf.before-wgpanel.$(date +%Y%m%d-%H%M%S)
 ```
 
-WGPanel reads `/etc/wireguard/<interface>.conf` before every apply and preserves unmanaged peer blocks, comments, `PostUp`, `PostDown`, routes, and interface settings.
+WGPanel reads `/etc/wireguard/<interface>.conf` before every apply and preserves unmanaged peer blocks, comments, `PostUp`, `PostDown`, routes, and interface settings. For managed peers it stores all server-side `AllowedIPs` separately from client-export `AllowedIPs` and preserves unknown peer directives during round trips.
 
 ## Diagnostics And Backups
 
@@ -197,6 +198,11 @@ ssh -L 8080:127.0.0.1:8080 user@server
 
 ## Advanced Docs
 
+- [MkDocs operations guide](docs/index.md)
+- [Stage 1 safe deployment](docs/deployment-stage1.md)
+- [Guest isolation design](docs/guest-isolation.md)
+- [Guest VPN deployment](docs/deployment-guest.md)
+- [Emergency rollback](docs/rollback.md)
 - [README_EXISTING_WIREGUARD.md](README_EXISTING_WIREGUARD.md)
 - [SECURITY.md](SECURITY.md)
 - [ADVANCED_INSTALL.md](ADVANCED_INSTALL.md)

@@ -8,11 +8,13 @@ WGPanel 0.1.3-beta also supports multiple interfaces. `wg0` is the default, but 
 
 WGPanel reads the current `wg0.conf` before every apply. It preserves `[Interface]` settings, comments, `PostUp`, `PostDown`, `MTU`, `Table`, routing rules, and unmanaged `[Peer]` blocks.
 
+For a managed peer, server-side `AllowedIPs` are stored as a complete list and are separate from client-export `AllowedIPs`. Existing managed blocks retain unknown directives such as `PresharedKey`, `Endpoint`, and `PersistentKeepalive`; WGPanel updates only the active server-side `AllowedIPs` line.
+
 Peers created or imported by WGPanel are managed peers. Existing peers that are not in SQLite are unmanaged peers. WGPanel shows unmanaged peers in the UI, but does not remove, disable, modify, reorder, or rewrite them.
 
 ## Taking Ownership
 
-Existing peers can be imported with “Take ownership.” This stores metadata such as name, notes, assigned IP, and expiration. It does not require and does not reveal the client private key.
+Existing peers can be imported with **Take ownership**. This stores every server-side AllowedIPs prefix plus metadata such as name, notes, assigned IP, and expiration. It does not require and does not reveal the client private key.
 
 Old client configs cannot be regenerated after import because WGPanel does not store client private keys.
 
@@ -33,16 +35,15 @@ When expiration disables a peer, it uses the same real disable behavior: the man
 Before each real apply, WGPanel’s root-owned helper copies the current config to:
 
 ```text
-/etc/wireguard/backups/wg0.conf.YYYYMMDD-HHMMSS.bak
+/etc/wireguard/backups/wg0.conf.YYYYMMDD-HHMMSS-microseconds.bak
 ```
 
 Backups stay under `/etc/wireguard/backups`, not `/run`, because `/run` is temporary.
 
-Restore a backup with:
+Backups are root-only mode `0600`. Restore one without taking the interface down:
 
 ```bash
-sudo cp /etc/wireguard/backups/<backup> /etc/wireguard/wg0.conf
-sudo systemctl restart wg-quick@wg0
+sudo /usr/local/sbin/wgpanel-helper restore --interface wg0 --backup /etc/wireguard/backups/<backup>
 ```
 
 ## Test Safely First

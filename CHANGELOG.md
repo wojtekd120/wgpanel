@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.7-beta - 2026-11-15
+
+- Separated server-side peer AllowedIPs from client-export AllowedIPs in the database, API, renderer, and UI.
+- Added migration from existing peer blocks so routed prefixes survive the first post-upgrade apply.
+- Preserved unknown directives and comments in managed peer blocks during config round trips.
+- Preserved complete managed peer blocks across disable/enable and redacted preshared keys in active and disabled previews.
+- Added cross-peer server prefix overlap detection.
+- Made helper apply atomic with runtime rollback and root-only config backups.
+- Added MkDocs operations, routing, guest-isolation, deployment, and rollback documentation.
+- Restricted peer creation to the interface explicitly assigned by its private or guest profile.
+- Added an opt-in `wg1` Guest profile with separate endpoint/key/pool, IPv4-only exports, fixed per-peer `/32` routes, and UI client type selection.
+- Added a fail-closed nftables guest policy, network-collision preflight, systemd ordering, VPS deployment checklist, isolation tests, and guest rollback.
+
 ## 0.1.6-beta
 
 - Marked Docker Compose as the official recommended installation method.

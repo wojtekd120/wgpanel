@@ -1,9 +1,11 @@
 import pytest
 
 from app.wireguard import (
+    allowed_ip_conflicts,
     allocate_next_ip,
     append_peer_to_config,
     handshake_activity_status,
+    parse_config_peer_blocks,
     parse_wg_dump,
     render_client_config,
     render_config_with_active_peers,
@@ -11,6 +13,7 @@ from app.wireguard import (
     strip_wgpanel_peer_blocks,
     unmanaged_used_ips,
     validate_allowed_ips,
+    server_allowed_ips_with_assigned_ip,
 )
 
 
@@ -78,8 +81,8 @@ def test_render_config_with_active_peers_removes_managed_disabled_peer():
 
     assert "wgpanel peer: active" in rendered
     assert KEY_B in rendered
-    assert "wgpanel peer: disabled" not in rendered
-    assert KEY_C not in rendered
+    assert "wgpanel-disabled-begin: disabled" in rendered
+    assert KEY_C not in {block.public_key for block in parse_config_peer_blocks(rendered)}
 
 
 def test_unmanaged_peer_is_preserved_when_rendering_managed_config():
@@ -108,7 +111,8 @@ def test_disable_removes_managed_peer_but_preserves_unmanaged_peer():
     rendered = render_config_with_active_peers(base, [("managed", KEY_B, "10.8.0.2", True)])
 
     assert KEY_C in rendered
-    assert KEY_B not in rendered
+    assert "wgpanel-disabled-begin: managed" in rendered
+    assert KEY_B not in {block.public_key for block in parse_config_peer_blocks(rendered)}
 
 
 def test_unmanaged_allowed_ips_are_considered_used():
@@ -156,3 +160,75 @@ def test_deleted_managed_key_is_not_preserved_as_unmanaged():
 
     assert KEY_B not in rendered
     assert KEY_C in rendered
+
+
+def test_managed_peer_keeps_multiple_server_allowed_ips_and_unknown_directives():
+    base = (
+        "[Interface]\n"
+        "PostUp = ip route replace 198.51.100.0/24 via 192.0.2.10 dev wg0\n"
+        "PostUp = iptables -t nat -A PREROUTING -i wg0 -d 203.0.113.0/24 -j NETMAP --to 198.51.100.0/24\n\n"
+        "# manually documented site peer\n"
+        "[Peer]\n"
+        f"PublicKey = {KEY_B}\n"
+        "PresharedKey = keep-this-secret\n"
+        "AllowedIPs = 192.0.2.10/32\n"
+        "PersistentKeepalive = 25\n"
+    )
+
+    rendered = render_config_with_active_peers(
+        base,
+        [("example-site", KEY_B, "192.0.2.10/32, 198.51.100.0/24", False)],
+        managed_public_keys={KEY_B},
+    )
+
+    assert "AllowedIPs = 192.0.2.10/32, 198.51.100.0/24" in rendered
+    assert "PresharedKey = keep-this-secret" in rendered
+    assert "PersistentKeepalive = 25" in rendered
+    assert "NETMAP --to 198.51.100.0/24" in rendered
+    assert "via 192.0.2.10 dev wg0" in rendered
+
+
+def test_server_allowed_ips_always_include_new_assigned_host_route():
+    assert server_allowed_ips_with_assigned_ip("192.0.2.11", "192.168.50.0/24") == (
+        "192.0.2.11/32, 192.168.50.0/24"
+    )
+
+
+def test_overlapping_server_allowed_ips_are_detected_across_peers():
+    conflicts = allowed_ip_conflicts(
+        [
+            (KEY_B, "site", "192.0.2.10/32, 198.51.100.0/24"),
+            (KEY_C, "other", "192.0.2.11/32, 198.51.100.55/32"),
+        ]
+    )
+
+    assert conflicts == [(KEY_B, "198.51.100.0/24", KEY_C, "198.51.100.55/32")]
+
+
+def test_disable_then_enable_preserves_unknown_peer_directives():
+    base = (
+        "[Interface]\nAddress = 192.0.2.1/24\n\n"
+        "# wgpanel peer: example-site\n"
+        "[Peer]\n"
+        f"PublicKey = {KEY_B}\n"
+        "PresharedKey = keep-across-disable\n"
+        "AllowedIPs = 192.0.2.10/32, 198.51.100.0/24\n"
+        "PersistentKeepalive = 25\n"
+    )
+    disabled = render_config_with_active_peers(
+        base,
+        [("example-site", KEY_B, "192.0.2.10/32, 198.51.100.0/24", True)],
+        managed_public_keys={KEY_B},
+    )
+    assert "# wgpanel-disabled PresharedKey = keep-across-disable" in disabled
+    assert KEY_B not in {block.public_key for block in parse_config_peer_blocks(disabled)}
+
+    enabled = render_config_with_active_peers(
+        disabled,
+        [("example-site", KEY_B, "192.0.2.10/32, 198.51.100.0/24", False)],
+        managed_public_keys={KEY_B},
+    )
+    assert "PresharedKey = keep-across-disable" in enabled
+    assert "PersistentKeepalive = 25" in enabled
+    assert "wgpanel-disabled" not in enabled
+    assert KEY_B in {block.public_key for block in parse_config_peer_blocks(enabled)}

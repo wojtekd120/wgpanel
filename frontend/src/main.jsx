@@ -130,6 +130,7 @@ function App() {
   const [dashboard, setDashboard] = useState(null)
   const [peers, setPeers] = useState([])
   const [interfaces, setInterfaces] = useState([])
+  const [profiles, setProfiles] = useState({ private: { interface: 'wg0', enabled: true }, guest: { interface: 'wg1', enabled: false } })
   const [currentInterface, setCurrentInterface] = useState('wg0')
   const [setupRequired, setSetupRequired] = useState(false)
   const [banner, setBanner] = useState('')
@@ -144,20 +145,21 @@ function App() {
   const [selectedId, setSelectedId] = useState(null)
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [theme, setTheme] = useState(() => localStorage.getItem('wgpanel-theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'))
-  const [form, setForm] = useState({ name: '', expires_at: '', no_expiration: true, dry_run: false, tunnel_mode: 'split', custom_allowed_ips: '', client_dns: '' })
-  const [edit, setEdit] = useState({ name: '', notes: '', expires_at: '' })
+  const [form, setForm] = useState({ name: '', peer_type: 'private', expires_at: '', no_expiration: true, dry_run: false, tunnel_mode: 'split', custom_allowed_ips: '', server_allowed_ips: '', client_dns: '' })
+  const [edit, setEdit] = useState({ name: '', notes: '', expires_at: '', server_allowed_ips: '', tunnel_mode: 'split', client_allowed_ips: '', client_dns: '' })
 
   const load = async () => {
     try {
       const setup = await fetch('/api/setup/status').then((r) => r.json()).catch(() => ({ setup_required: false }))
       setSetupRequired(setup.setup_required)
       if (setup.setup_required) return
-      const [dash, peerRows, ifaceRows, selected, backupRows, onboardingRows] = await Promise.all([api('/dashboard'), api('/peers'), api('/interfaces'), api('/settings/interface'), api('/backups'), api('/diagnostics')])
+      const [dash, peerRows, ifaceRows, selected, backupRows, onboardingRows, profileRows] = await Promise.all([api('/dashboard'), api('/peers'), api('/interfaces'), api('/settings/interface'), api('/backups'), api('/diagnostics'), api('/peer-profiles')])
       setDashboard(dash)
       setPeers(peerRows)
       setBackups(backupRows.backups || [])
       setOnboarding(onboardingRows || [])
       setInterfaces(ifaceRows.interfaces || [])
+      setProfiles(profileRows)
       setCurrentInterface(selected.interface)
       setAuthed(true)
       if (!selectedId && peerRows.length) setSelectedId(peerRows[0].id)
@@ -186,6 +188,10 @@ function App() {
         name: selectedPeer.name,
         notes: selectedPeer.notes || '',
         expires_at: selectedPeer.expires_at ? selectedPeer.expires_at.slice(0, 16) : '',
+        server_allowed_ips: selectedPeer.server_allowed_ips || '',
+        tunnel_mode: selectedPeer.tunnel_mode || 'split',
+        client_allowed_ips: selectedPeer.client_allowed_ips || '',
+        client_dns: selectedPeer.client_dns || '',
       })
     }
   }, [selectedPeer?.id])
@@ -207,20 +213,27 @@ function App() {
       expiresAt = parsed.toISOString()
     }
     try {
-      const created = await api('/peers', {
+      const targetInterface = form.peer_type === 'guest' ? profiles.guest.interface : profiles.private.interface
+      const created = await api(`/peers?interface=${encodeURIComponent(targetInterface)}`, {
         method: 'POST',
         body: JSON.stringify({
           name: form.name.trim(),
+          peer_type: form.peer_type,
           dry_run: form.dry_run,
           expires_at: expiresAt,
           tunnel_mode: form.tunnel_mode,
           custom_allowed_ips: form.tunnel_mode === 'custom' ? form.custom_allowed_ips : null,
+          server_allowed_ips: form.server_allowed_ips || null,
           client_dns: form.client_dns || null,
         }),
       })
       setResult(created)
       setSelectedId(created.peer.id || selectedId)
-      setForm({ name: '', expires_at: '', no_expiration: true, dry_run: false, tunnel_mode: 'split', custom_allowed_ips: '', client_dns: '' })
+      if (!form.dry_run && currentInterface !== targetInterface) {
+        await api('/settings/interface', { method: 'POST', body: JSON.stringify({ interface: targetInterface }) })
+        setCurrentInterface(targetInterface)
+      }
+      setForm({ name: '', peer_type: 'private', expires_at: '', no_expiration: true, dry_run: false, tunnel_mode: 'split', custom_allowed_ips: '', server_allowed_ips: '', client_dns: '' })
       setBanner(created.dry_run ? 'Preview generated successfully' : 'Peer created successfully')
       await load()
     } catch (err) {
@@ -336,6 +349,10 @@ function App() {
           name: edit.name.trim(),
           notes: edit.notes,
           expires_at: edit.expires_at ? new Date(edit.expires_at).toISOString() : null,
+          server_allowed_ips: edit.server_allowed_ips,
+          tunnel_mode: edit.tunnel_mode,
+          client_allowed_ips: edit.client_allowed_ips,
+          client_dns: edit.client_dns,
         }),
       })
       setBanner('Peer details saved')
@@ -443,19 +460,33 @@ function App() {
             <input value={form.name} onChange={(event) => setForm({ ...form, name: event.target.value })} />
           </label>
           <label>
+            <span>Client type</span>
+            <select value={form.peer_type} onChange={(event) => setForm({ ...form, peer_type: event.target.value })}>
+              <option value="private">Private</option>
+              <option value="guest" disabled={!profiles.guest.enabled}>Guest (isolated){profiles.guest.enabled ? '' : ' - not configured'}</option>
+            </select>
+            <small>{form.peer_type === 'guest' ? `Separate ${profiles.guest.interface}, IPv4 internet only; private networks and other guests are blocked.` : `Managed on ${profiles.private.interface}.`}</small>
+          </label>
+          {form.peer_type === 'private' && <label>
             <span>Tunnel mode</span>
             <select value={form.tunnel_mode} onChange={(event) => setForm({ ...form, tunnel_mode: event.target.value })}>
               <option value="split">Split tunnel</option>
               <option value="full">Full tunnel</option>
               <option value="custom">Custom AllowedIPs</option>
             </select>
-          </label>
-          {form.tunnel_mode === 'custom' && (
+          </label>}
+          {form.peer_type === 'private' && form.tunnel_mode === 'custom' && (
             <label>
-              <span>Custom AllowedIPs</span>
+              <span>Client-side AllowedIPs (export)</span>
               <input placeholder="10.8.0.0/24, 198.51.100.0/24" value={form.custom_allowed_ips} onChange={(event) => setForm({ ...form, custom_allowed_ips: event.target.value })} />
+              <small>Routes installed on the client. This does not control server cryptokey routing.</small>
             </label>
           )}
+          {form.peer_type === 'private' && <label>
+            <span>Additional server-side AllowedIPs</span>
+            <input placeholder="198.51.100.0/24" value={form.server_allowed_ips} onChange={(event) => setForm({ ...form, server_allowed_ips: event.target.value })} />
+            <small>Optional networks behind this peer. Its assigned /32 is added automatically.</small>
+          </label>}
           <label>
             <span>DNS (optional)</span>
             <input placeholder="Default from server" value={form.client_dns} onChange={(event) => setForm({ ...form, client_dns: event.target.value })} />
@@ -485,7 +516,7 @@ function App() {
             const live = statusByKey.get(peer.public_key)
             return (
               <div className={selectedId === peer.id ? 'peer-row selected' : 'peer-row'} key={peer.id} role="button" tabIndex="0" onClick={() => setSelectedId(peer.id)} onKeyDown={(event) => { if (event.key === 'Enter') setSelectedId(peer.id) }}>
-                <span>{peer.name}</span>
+                <span>{peer.name}<small>{peer.peer_type === 'guest' ? 'Guest (isolated)' : 'Private'}</small></span>
                 <span className={peer.status === 'Unmanaged' ? 'badge unmanaged' : peer.status === 'Expired' ? 'badge expired' : peer.disabled ? 'badge off' : 'badge on'}>{peer.status}</span>
                 <span>{peer.assigned_ip}</span>
                 <span>
@@ -518,7 +549,10 @@ function App() {
           <div className="detail-grid">
             <div><span>Name</span><strong>{selectedPeer.name}</strong></div>
             <div><span>Status</span><strong>{selectedPeer.disabled ? 'Disabled' : 'Enabled'}</strong></div>
+            <div><span>Client type</span><strong>{selectedPeer.peer_type === 'guest' ? 'Guest (isolated)' : 'Private'}</strong></div>
             <div><span>Assigned IP</span><strong>{selectedPeer.assigned_ip}</strong></div>
+            <div className="wide"><span>Server-side AllowedIPs</span><code>{selectedPeer.server_allowed_ips || 'none'}</code></div>
+            <div className="wide"><span>Client-side AllowedIPs (export)</span><code>{selectedPeer.client_allowed_ips || 'none'}</code></div>
             <div><span>Created</span><strong>{formatDate(selectedPeer.created_at)}</strong></div>
             <div><span>Expires</span><strong>{selectedPeer.expires_at ? formatDate(selectedPeer.expires_at) : 'No expiration'}</strong></div>
             <div><span>Latest handshake</span><strong>{selectedStatus?.latest_handshake ? new Date(selectedStatus.latest_handshake * 1000).toLocaleString() : 'never'}</strong></div>
@@ -528,11 +562,37 @@ function App() {
             <div className="wide"><span>Client config</span><strong>{selectedPeer.managed ? 'Client private key is not stored, so this config cannot be regenerated.' : 'Unmanaged peer. Client private key is not stored, so this config cannot be regenerated.'}</strong></div>
           </div>
           {selectedPeer.managed && <div className="edit-panel">
-            <h2>Edit Metadata</h2>
+            <h2>Edit Peer</h2>
             <label><span>Name</span><input value={edit.name} onChange={(event) => setEdit({ ...edit, name: event.target.value })} /></label>
             <label><span>Notes</span><textarea value={edit.notes} onChange={(event) => setEdit({ ...edit, notes: event.target.value })} /></label>
             <label><span>Expires at (optional)</span><input type="datetime-local" value={edit.expires_at} onChange={(event) => setEdit({ ...edit, expires_at: event.target.value })} /></label>
-            <button onClick={saveMetadata}>Save details</button>
+            <label>
+              <span>Server-side AllowedIPs</span>
+              <input disabled={selectedPeer.peer_type === 'guest'} value={edit.server_allowed_ips} onChange={(event) => setEdit({ ...edit, server_allowed_ips: event.target.value })} />
+              <small>{selectedPeer.peer_type === 'guest' ? 'Guest peers are fixed to their assigned /32.' : `Cryptokey routes accepted from and sent to this peer. Must include ${selectedPeer.assigned_ip}/32.`}</small>
+            </label>
+            <label>
+              <span>Client tunnel mode</span>
+              <select disabled={selectedPeer.peer_type === 'guest'} value={edit.tunnel_mode} onChange={(event) => {
+                const mode = event.target.value
+                setEdit({
+                  ...edit,
+                  tunnel_mode: mode,
+                  client_allowed_ips: mode === 'full' ? '0.0.0.0/0, ::/0' : mode === 'split' ? (dashboard?.client_address_pool || edit.client_allowed_ips) : edit.client_allowed_ips,
+                })
+              }}>
+                <option value="split">Split tunnel</option>
+                <option value="full">Full tunnel</option>
+                <option value="custom">Custom</option>
+              </select>
+            </label>
+            <label>
+              <span>Client-side AllowedIPs (export metadata)</span>
+              <input disabled={selectedPeer.peer_type === 'guest'} value={edit.client_allowed_ips} onChange={(event) => setEdit({ ...edit, client_allowed_ips: event.target.value })} />
+              <small>{selectedPeer.peer_type === 'guest' ? 'IPv4-only full tunnel (0.0.0.0/0); no IPv6 route is exported.' : 'Stored for client export semantics; it is never written into the server peer block.'}</small>
+            </label>
+            <label><span>Client DNS</span><input value={edit.client_dns} onChange={(event) => setEdit({ ...edit, client_dns: event.target.value })} /></label>
+            <button onClick={saveMetadata}>Save peer</button>
           </div>}
         </section>
       )}
