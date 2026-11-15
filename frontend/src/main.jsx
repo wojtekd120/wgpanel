@@ -46,7 +46,24 @@ const formatMbps = (value = 0) => {
   const digits = speed >= 100 ? 0 : speed >= 10 ? 1 : speed >= 1 ? 2 : 3
   return `${speed.toFixed(digits)} Mbps`
 }
-const wait = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds))
+const addRateSample = (previous, fromPeer, toPeer) => {
+  const samples = (previous?.samples || 0) + 1
+  const fromSum = (previous?.from_sum || 0) + fromPeer
+  const toSum = (previous?.to_sum || 0) + toPeer
+  return {
+    samples,
+    current_from_mbps: fromPeer,
+    current_to_mbps: toPeer,
+    min_from_mbps: previous ? Math.min(previous.min_from_mbps, fromPeer) : fromPeer,
+    min_to_mbps: previous ? Math.min(previous.min_to_mbps, toPeer) : toPeer,
+    max_from_mbps: previous ? Math.max(previous.max_from_mbps, fromPeer) : fromPeer,
+    max_to_mbps: previous ? Math.max(previous.max_to_mbps, toPeer) : toPeer,
+    average_from_mbps: fromSum / samples,
+    average_to_mbps: toSum / samples,
+    from_sum: fromSum,
+    to_sum: toSum,
+  }
+}
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState('admin')
@@ -270,54 +287,84 @@ function App() {
   const [deleteTarget, setDeleteTarget] = useState(null)
   const [trafficSnapshot, setTrafficSnapshot] = useState(null)
   const [trafficBusy, setTrafficBusy] = useState(false)
+  const [trafficLive, setTrafficLive] = useState(false)
   const trafficMeasurementId = useRef(0)
+  const trafficTimer = useRef(null)
   const [theme, setTheme] = useState(() => localStorage.getItem('wgpanel-theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'))
   const [form, setForm] = useState({ name: '', peer_type: 'private', expires_at: '', no_expiration: true, dry_run: false, tunnel_mode: 'split', custom_allowed_ips: '', server_allowed_ips: '', client_dns: '' })
   const [edit, setEdit] = useState({ name: '', notes: '', expires_at: '', server_allowed_ips: '', tunnel_mode: 'split', client_allowed_ips: '', client_dns: '' })
 
-  const sampleTraffic = async (interfaceName = currentInterface) => {
-    if (trafficBusy) return
-    const measurementId = trafficMeasurementId.current + 1
-    trafficMeasurementId.current = measurementId
-    setTrafficBusy(true)
-    try {
-      const query = `?interface=${encodeURIComponent(interfaceName)}`
-      const first = await api(`/dashboard${query}`)
-      const startedAt = performance.now()
-      await wait(2000)
-      const second = await api(`/dashboard${query}`)
-      const elapsedSeconds = Math.max((performance.now() - startedAt) / 1000, 0.001)
-      const previousByKey = new Map((first.peers || []).map((peer) => [peer.public_key, peer]))
-      const peerRates = (second.peers || []).map((peer) => {
-        const previous = previousByKey.get(peer.public_key)
-        const rxBytes = previous ? Math.max(0, peer.transfer_rx - previous.transfer_rx) : 0
-        const txBytes = previous ? Math.max(0, peer.transfer_tx - previous.transfer_tx) : 0
-        return {
-          public_key: peer.public_key,
-          from_peer_mbps: (rxBytes * 8) / elapsedSeconds / 1_000_000,
-          to_peer_mbps: (txBytes * 8) / elapsedSeconds / 1_000_000,
-        }
-      })
-      if (trafficMeasurementId.current !== measurementId) return
-      setDashboard((current) => current?.interface === interfaceName ? second : current)
-      setTrafficSnapshot({
-        interface: interfaceName,
-        measured_at: new Date().toISOString(),
-        sample_seconds: elapsedSeconds,
-        peers: peerRates,
-        from_peers_mbps: peerRates.reduce((total, peer) => total + peer.from_peer_mbps, 0),
-        to_peers_mbps: peerRates.reduce((total, peer) => total + peer.to_peer_mbps, 0),
-      })
-    } catch (err) {
-      if (trafficMeasurementId.current === measurementId) {
-        setBanner(err.message || 'Unable to measure traffic')
-      }
-    } finally {
-      if (trafficMeasurementId.current === measurementId) setTrafficBusy(false)
-    }
+  const stopTraffic = ({ reset = false } = {}) => {
+    trafficMeasurementId.current += 1
+    if (trafficTimer.current) window.clearTimeout(trafficTimer.current)
+    trafficTimer.current = null
+    setTrafficLive(false)
+    setTrafficBusy(false)
+    if (reset) setTrafficSnapshot(null)
   }
 
-  const load = async ({ sampleAfterLoad = false } = {}) => {
+  const startTraffic = (interfaceName = currentInterface) => {
+    if (trafficLive) return
+    const measurementId = trafficMeasurementId.current + 1
+    trafficMeasurementId.current = measurementId
+    setTrafficSnapshot(null)
+    setTrafficLive(true)
+    setTrafficBusy(true)
+    let previousDashboard = null
+    let previousAt = null
+    let aggregateStats = null
+    const peerStats = new Map()
+    const query = `?interface=${encodeURIComponent(interfaceName)}`
+
+    const poll = async () => {
+      try {
+        const currentDashboard = await api(`/dashboard${query}`)
+        const currentAt = performance.now()
+        if (trafficMeasurementId.current !== measurementId) return
+        setDashboard((current) => current?.interface === interfaceName ? currentDashboard : current)
+
+        if (previousDashboard && previousAt !== null) {
+          const elapsedSeconds = Math.max((currentAt - previousAt) / 1000, 0.001)
+          const previousByKey = new Map((previousDashboard.peers || []).map((peer) => [peer.public_key, peer]))
+          const rates = (currentDashboard.peers || []).map((peer) => {
+            const previous = previousByKey.get(peer.public_key)
+            const rxBytes = previous ? Math.max(0, peer.transfer_rx - previous.transfer_rx) : 0
+            const txBytes = previous ? Math.max(0, peer.transfer_tx - previous.transfer_tx) : 0
+            const fromPeer = (rxBytes * 8) / elapsedSeconds / 1_000_000
+            const toPeer = (txBytes * 8) / elapsedSeconds / 1_000_000
+            const stats = addRateSample(peerStats.get(peer.public_key), fromPeer, toPeer)
+            peerStats.set(peer.public_key, stats)
+            return { public_key: peer.public_key, ...stats }
+          })
+          const totalFrom = rates.reduce((total, peer) => total + peer.current_from_mbps, 0)
+          const totalTo = rates.reduce((total, peer) => total + peer.current_to_mbps, 0)
+          aggregateStats = addRateSample(aggregateStats, totalFrom, totalTo)
+          setTrafficSnapshot({
+            interface: interfaceName,
+            measured_at: new Date().toISOString(),
+            sample_seconds: elapsedSeconds,
+            peers: rates,
+            ...aggregateStats,
+          })
+          setTrafficBusy(false)
+        }
+
+        previousDashboard = currentDashboard
+        previousAt = currentAt
+        if (trafficMeasurementId.current === measurementId) {
+          trafficTimer.current = window.setTimeout(poll, 2000)
+        }
+      } catch (err) {
+        if (trafficMeasurementId.current === measurementId) {
+          setBanner(err.message || 'Unable to monitor traffic')
+          stopTraffic()
+        }
+      }
+    }
+    poll()
+  }
+
+  const load = async () => {
     try {
       const setup = await fetch('/api/setup/status').then((r) => r.json()).catch(() => ({ setup_required: false }))
       setSetupRequired(setup.setup_required)
@@ -332,7 +379,6 @@ function App() {
       setCurrentInterface(selected.interface)
       setAuthed(true)
       if (!selectedId && peerRows.length) setSelectedId(peerRows[0].id)
-      if (sampleAfterLoad) sampleTraffic(selected.interface)
     } catch (err) {
       if (err.message === 'Not authenticated') setAuthed(false)
       else setBanner(err.message || 'Unable to load WGPanel data')
@@ -340,8 +386,22 @@ function App() {
   }
 
   useEffect(() => {
-    load({ sampleAfterLoad: true })
+    load()
   }, [])
+
+  useEffect(() => {
+    const stopWhenHidden = () => { if (document.hidden) stopTraffic() }
+    document.addEventListener('visibilitychange', stopWhenHidden)
+    return () => {
+      document.removeEventListener('visibilitychange', stopWhenHidden)
+      trafficMeasurementId.current += 1
+      if (trafficTimer.current) window.clearTimeout(trafficTimer.current)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (page !== 'dashboard' && trafficLive) stopTraffic()
+  }, [page])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -496,9 +556,7 @@ function App() {
 
   const switchInterface = async (value) => {
     try {
-      trafficMeasurementId.current += 1
-      setTrafficBusy(false)
-      setTrafficSnapshot(null)
+      stopTraffic({ reset: true })
       await api('/settings/interface', { method: 'POST', body: JSON.stringify({ interface: value }) })
       setCurrentInterface(value)
       setSelectedId(null)
@@ -551,6 +609,7 @@ function App() {
   }
 
   const logout = async () => {
+    stopTraffic({ reset: true })
     await api('/logout', { method: 'POST' })
     setAuthed(false)
   }
@@ -583,7 +642,7 @@ function App() {
 
   if (setupRequired) return <Setup />
   if (window.location.pathname === '/setup') return <Setup disabled />
-  if (!authed) return <Login onLogin={() => load({ sampleAfterLoad: true })} />
+  if (!authed) return <Login onLogin={load} />
 
   return (
     <main className="app-shell">
@@ -630,18 +689,35 @@ function App() {
       <section className="traffic-card">
         <div className="traffic-heading">
           <div>
-            <h2>Traffic snapshot · {currentInterface}</h2>
-            <p>Two-second measurement on login or on demand. No background polling.</p>
+            <h2>Live traffic - {currentInterface}</h2>
+            <p>Updates every two seconds only while this view is running. Statistics reset on every start; RX/TX totals persist until WireGuard resets them.</p>
           </div>
-          <button className="small-button" disabled={trafficBusy} onClick={() => sampleTraffic(currentInterface)}>
-            <RefreshCw className={trafficBusy ? 'spin' : ''} size={16} />
-            {trafficBusy ? 'Measuring...' : 'Measure now'}
+          <button className={trafficLive ? 'small-button live-stop' : 'small-button'} onClick={() => trafficLive ? stopTraffic() : startTraffic(currentInterface)}>
+            <RefreshCw className={trafficLive ? 'spin' : ''} size={16} />
+            {trafficLive ? (trafficBusy ? 'Starting... (click to stop)' : 'Stop live') : 'Start live'}
           </button>
         </div>
-        <div className="traffic-totals">
-          <div><span>From peers</span><strong>{trafficSnapshot?.interface === currentInterface ? formatMbps(trafficSnapshot.from_peers_mbps) : 'Not measured'}</strong></div>
-          <div><span>To peers</span><strong>{trafficSnapshot?.interface === currentInterface ? formatMbps(trafficSnapshot.to_peers_mbps) : 'Not measured'}</strong></div>
-          <div><span>Measured</span><strong>{trafficSnapshot?.interface === currentInterface ? new Date(trafficSnapshot.measured_at).toLocaleTimeString() : '—'}</strong></div>
+        <div className="traffic-meta">
+          <span>{trafficLive ? 'Monitoring active' : 'Monitoring stopped'}</span>
+          <span>Samples: {trafficSnapshot?.samples || 0}</span>
+          <span>Last update: {trafficSnapshot?.measured_at ? new Date(trafficSnapshot.measured_at).toLocaleTimeString() : '-'}</span>
+        </div>
+        <div className="traffic-rate-table">
+          <div className="traffic-rate-row traffic-rate-head"><span>Direction</span><span>Current</span><span>Minimum</span><span>Average</span><span>Maximum</span></div>
+          <div className="traffic-rate-row">
+            <strong>From peers</strong>
+            <span>{trafficSnapshot ? formatMbps(trafficSnapshot.current_from_mbps) : '-'}</span>
+            <span>{trafficSnapshot ? formatMbps(trafficSnapshot.min_from_mbps) : '-'}</span>
+            <span>{trafficSnapshot ? formatMbps(trafficSnapshot.average_from_mbps) : '-'}</span>
+            <span>{trafficSnapshot ? formatMbps(trafficSnapshot.max_from_mbps) : '-'}</span>
+          </div>
+          <div className="traffic-rate-row">
+            <strong>To peers</strong>
+            <span>{trafficSnapshot ? formatMbps(trafficSnapshot.current_to_mbps) : '-'}</span>
+            <span>{trafficSnapshot ? formatMbps(trafficSnapshot.min_to_mbps) : '-'}</span>
+            <span>{trafficSnapshot ? formatMbps(trafficSnapshot.average_to_mbps) : '-'}</span>
+            <span>{trafficSnapshot ? formatMbps(trafficSnapshot.max_to_mbps) : '-'}</span>
+          </div>
         </div>
       </section>
 
@@ -703,7 +779,7 @@ function App() {
 
         <div className="peer-table">
           <div className="table-head">
-            <span>Name</span><span>Status</span><span>IP</span><span>Handshake</span><span>RX / TX</span><span></span>
+            <span>Name</span><span>Status</span><span>IP</span><span>Handshake</span><span>Total RX / TX</span><span></span>
           </div>
           {peers.map((peer) => {
             const live = statusByKey.get(peer.public_key)
@@ -721,7 +797,10 @@ function App() {
                 </span>
                 <span>
                   {live ? `${formatBytes(live.transfer_rx)} / ${formatBytes(live.transfer_tx)}` : '0 B / 0 B'}
-                  <small>{speed ? `From: ${formatMbps(speed.from_peer_mbps)} · To: ${formatMbps(speed.to_peer_mbps)}` : 'Speed not measured'}</small>
+                  <small>{speed ? `Now F/T: ${formatMbps(speed.current_from_mbps)} / ${formatMbps(speed.current_to_mbps)}` : 'Live speed not started'}</small>
+                  {speed && <small>Min F/T: {formatMbps(speed.min_from_mbps)} / {formatMbps(speed.min_to_mbps)}</small>}
+                  {speed && <small>Avg F/T: {formatMbps(speed.average_from_mbps)} / {formatMbps(speed.average_to_mbps)}</small>}
+                  {speed && <small>Max F/T: {formatMbps(speed.max_from_mbps)} / {formatMbps(speed.max_to_mbps)}</small>}
                 </span>
                 <span className="row-actions">
                   {peer.managed ? (
@@ -754,9 +833,11 @@ function App() {
             <div><span>Expires</span><strong>{selectedPeer.expires_at ? formatDate(selectedPeer.expires_at) : 'No expiration'}</strong></div>
             <div><span>Latest handshake</span><strong>{selectedStatus?.latest_handshake ? new Date(selectedStatus.latest_handshake * 1000).toLocaleString() : 'never'}</strong></div>
             <div><span>Activity</span><strong><span className={`badge activity ${selectedStatus?.activity_status === 'Active' ? 'on' : selectedStatus?.activity_status === 'Recent' ? 'recent' : selectedStatus?.activity_status === 'Stale' ? 'expired' : 'off'}`}>{selectedStatus?.activity_status || 'Never connected'}</span></strong></div>
-            <div><span>RX / TX</span><strong>{selectedStatus ? `${formatBytes(selectedStatus.transfer_rx)} / ${formatBytes(selectedStatus.transfer_tx)}` : '0 B / 0 B'}</strong></div>
-            <div><span>From this peer</span><strong>{trafficByKey.has(selectedPeer.public_key) ? formatMbps(trafficByKey.get(selectedPeer.public_key).from_peer_mbps) : 'Not measured'}</strong></div>
-            <div><span>To this peer</span><strong>{trafficByKey.has(selectedPeer.public_key) ? formatMbps(trafficByKey.get(selectedPeer.public_key).to_peer_mbps) : 'Not measured'}</strong></div>
+            <div><span>Total RX / TX</span><strong>{selectedStatus ? `${formatBytes(selectedStatus.transfer_rx)} / ${formatBytes(selectedStatus.transfer_tx)}` : '0 B / 0 B'}</strong></div>
+            <div><span>Current from this peer</span><strong>{trafficByKey.has(selectedPeer.public_key) ? formatMbps(trafficByKey.get(selectedPeer.public_key).current_from_mbps) : 'Not measured'}</strong></div>
+            <div><span>Current to this peer</span><strong>{trafficByKey.has(selectedPeer.public_key) ? formatMbps(trafficByKey.get(selectedPeer.public_key).current_to_mbps) : 'Not measured'}</strong></div>
+            <div><span>Maximum from this peer</span><strong>{trafficByKey.has(selectedPeer.public_key) ? formatMbps(trafficByKey.get(selectedPeer.public_key).max_from_mbps) : 'Not measured'}</strong></div>
+            <div><span>Maximum to this peer</span><strong>{trafficByKey.has(selectedPeer.public_key) ? formatMbps(trafficByKey.get(selectedPeer.public_key).max_to_mbps) : 'Not measured'}</strong></div>
             <div className="wide key-line"><span>Public key</span><code>{selectedPeer.public_key}</code><button className="small-button" onClick={() => copyPublicKey(selectedPeer.public_key)}>Copy</button></div>
             <div className="wide"><span>Client config</span><strong>{selectedPeer.managed ? 'Client private key is not stored, so this config cannot be regenerated.' : 'Unmanaged peer. Client private key is not stored, so this config cannot be regenerated.'}</strong></div>
           </div>

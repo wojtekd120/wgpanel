@@ -131,10 +131,13 @@ small { color: var(--muted); display: block; font-size: 12px; margin-top: 4px; }
 .traffic-heading { align-items: center; display: flex; gap: 14px; justify-content: space-between; }
 .traffic-heading h2 { font-size: 17px; margin: 0 0 4px; }
 .traffic-heading p { color: var(--muted); font-size: 13px; margin: 0; }
-.traffic-totals { display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 14px; }
-.traffic-totals div { background: var(--soft); border-radius: 7px; display: grid; gap: 5px; padding: 12px; }
-.traffic-totals span { color: var(--muted); font-size: 12px; font-weight: 700; }
-.traffic-totals strong { font-size: 18px; }
+.traffic-meta { color: var(--muted); display: flex; flex-wrap: wrap; font-size: 12px; gap: 8px 18px; margin-top: 12px; }
+.traffic-rate-table { background: var(--soft); border-radius: 7px; margin-top: 12px; overflow-x: auto; }
+.traffic-rate-row { align-items: center; display: grid; gap: 12px; grid-template-columns: 1.1fr repeat(4, 1fr); min-width: 650px; padding: 10px 12px; }
+.traffic-rate-row + .traffic-rate-row { border-top: 1px solid var(--line); }
+.traffic-rate-head { color: var(--muted); font-size: 12px; font-weight: 700; }
+.traffic-rate-row:not(.traffic-rate-head) span { font-variant-numeric: tabular-nums; }
+.live-stop { border-color: var(--danger); color: var(--danger); }
 .spin { animation: spin .8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -218,7 +221,7 @@ small { color: var(--muted); display: block; font-size: 12px; margin-top: 4px; }
 
 @media (max-width: 860px) {
   .app-shell { padding: 14px; }
-  .stats, .workspace, .result, .details, .checklist, .help-grid, .traffic-totals { grid-template-columns: 1fr; }
+  .stats, .workspace, .result, .details, .checklist, .help-grid { grid-template-columns: 1fr; }
   .topbar { align-items: flex-start; flex-direction: column; }
   .actions { flex-wrap: wrap; justify-content: flex-start; width: 100%; }
   .actions select { flex: 1 1 180px; min-width: 0; }

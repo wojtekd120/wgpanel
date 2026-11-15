@@ -2,8 +2,9 @@
 
 ## 0.1.9-beta - 2026-11-15
 
-- Added an on-demand two-second traffic snapshot with per-peer and aggregate Mbps rates.
-- Measures once after login and only when requested afterward; no background polling or traffic history is stored.
+- Added an opt-in live traffic view with per-peer and aggregate Mbps rates updated every two seconds.
+- Tracks current, minimum, average, and maximum rates for the active viewing session while retaining cumulative RX/TX counters.
+- Monitoring stops automatically when leaving Dashboard, switching interface, hiding the browser tab, or logging out; no traffic history is stored.
 - Supports both the selected private interface and the isolated Guest interface.
 - Improved cumulative WireGuard transfer counter formatting.
 
