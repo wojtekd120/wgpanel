@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { Circle, Download, KeyRound, LogOut, Moon, Plus, RefreshCw, RotateCcw, ShieldOff, Sun, Trash2, X } from 'lucide-react'
+import { Circle, Download, HelpCircle, KeyRound, LogOut, Moon, Plus, RefreshCw, RotateCcw, ShieldOff, Sun, Trash2, X } from 'lucide-react'
 import './styles.css'
 
 const friendlyError = (body, fallback = 'Something went wrong. Please try again.') => {
@@ -122,6 +122,114 @@ function Setup({ disabled = false }) {
         )}
       </form>
     </main>
+  )
+}
+
+function HelpPage({ currentInterface, profiles, onCopy, onOpenDiagnostics, onOpenBackups }) {
+  const guestInterface = profiles?.guest?.interface || 'wg1'
+  const topics = [
+    {
+      title: 'WGPanel container',
+      description: 'Start here when the page does not load, health is degraded, or an update failed.',
+      commands: [
+        'docker compose ps',
+        'docker compose logs --tail=100 wgpanel',
+        'docker compose restart wgpanel',
+      ],
+    },
+    {
+      title: `WireGuard ${currentInterface}`,
+      description: 'These commands show public peer state and routing. They do not print private keys.',
+      commands: [
+        `sudo wg show ${currentInterface}`,
+        `sudo wg show ${currentInterface} allowed-ips`,
+        'ip -4 route show',
+      ],
+    },
+    {
+      title: 'Safe config inspection',
+      description: 'Use the redacted command when sharing a config for support. Never paste the raw file.',
+      commands: [
+        `sudo sed -E 's/^([[:space:]]*(PrivateKey|PresharedKey)[[:space:]]*=).*/\\1 <redacted>/' /etc/wireguard/${currentInterface}.conf`,
+      ],
+    },
+    {
+      title: 'Routing and AllowedIPs',
+      description: 'Server-side AllowedIPs select the peer on the VPS. Client-side AllowedIPs only control routes exported to the client.',
+      commands: [
+        `sudo wg show ${currentInterface} allowed-ips`,
+        'ip -4 route get 1.1.1.1',
+        'sudo iptables-nft -t nat -S',
+      ],
+    },
+    {
+      title: `Guest VPN (${guestInterface})`,
+      description: profiles?.guest?.enabled
+        ? 'Guest mode is enabled. Check the interface, fail-closed firewall, UFW, and service ordering.'
+        : 'Guest mode is disabled. Install and verify the host firewall before enabling it in .env.',
+      commands: [
+        `sudo wg show ${guestInterface}`,
+        'sudo nft -a list table inet wgpanel_guest',
+        `sudo systemctl status wgpanel-guest-firewall wg-quick@${guestInterface} --no-pager`,
+        'sudo ufw status verbose',
+      ],
+    },
+    {
+      title: 'Update verification',
+      description: 'Confirm the checked-out release, rebuild only WGPanel, and inspect startup before making peer changes.',
+      commands: [
+        'git log -1 --oneline',
+        'cat VERSION',
+        'docker compose build wgpanel && docker compose up -d --no-deps wgpanel',
+      ],
+    },
+  ]
+
+  return (
+    <section className="help-page">
+      <div className="help-hero">
+        <div>
+          <h2><HelpCircle size={20} /> Help &amp; recovery</h2>
+          <p>Read-only checks and safe first actions for the currently selected interface <strong>{currentInterface}</strong>.</p>
+        </div>
+        <div className="help-actions">
+          <button className="small-button" onClick={onOpenDiagnostics}>Open Diagnostics</button>
+          <button className="small-button" onClick={onOpenBackups}>Open Backups</button>
+        </div>
+      </div>
+
+      <div className="warning help-warning">
+        Stop before destructive recovery: never run <code>docker compose down -v</code>, never delete the database, and do not restart or recreate WireGuard when your administrative access depends on it.
+      </div>
+
+      <div className="help-grid">
+        {topics.map((topic) => (
+          <article className="help-card" key={topic.title}>
+            <h3>{topic.title}</h3>
+            <p>{topic.description}</p>
+            <div className="help-commands">
+              {topic.commands.map((command) => (
+                <div className="help-command" key={command}>
+                  <code>{command}</code>
+                  <button className="small-button" onClick={() => onCopy(command)}>Copy</button>
+                </div>
+              ))}
+            </div>
+          </article>
+        ))}
+      </div>
+
+      <div className="help-card help-wide">
+        <h3>Safe recovery order</h3>
+        <ol>
+          <li>Keep a second SSH session or provider console open.</li>
+          <li>Create database and WireGuard config backups before changing anything.</li>
+          <li>Stop only the WGPanel container if the UI is misbehaving; the active tunnel keeps running.</li>
+          <li>Use Diagnostics and redacted output. Never share PrivateKey or PresharedKey values.</li>
+          <li>Restore a backup with the restricted helper instead of taking the interface down.</li>
+        </ol>
+      </div>
+    </section>
   )
 }
 
@@ -434,6 +542,7 @@ function App() {
         <button className={page === 'dashboard' ? 'active' : ''} onClick={() => setPage('dashboard')}>Dashboard</button>
         <button className={page === 'diagnostics' ? 'active' : ''} onClick={() => setPage('diagnostics')}>Diagnostics</button>
         <button className={page === 'backups' ? 'active' : ''} onClick={() => setPage('backups')}>Backups</button>
+        <button className={page === 'help' ? 'active' : ''} onClick={() => setPage('help')}><HelpCircle size={16} /> Help</button>
       </nav>
 
       {banner && <div className="banner">{banner}</div>}
@@ -662,6 +771,16 @@ function App() {
           <pre>{backupDiff || 'Select a backup to view its diff against the current config.'}</pre>
         </div>
       </section>
+      )}
+
+      {page === 'help' && (
+        <HelpPage
+          currentInterface={currentInterface}
+          profiles={profiles}
+          onCopy={copyText}
+          onOpenDiagnostics={() => setPage('diagnostics')}
+          onOpenBackups={() => setPage('backups')}
+        />
       )}
 
       {result && (

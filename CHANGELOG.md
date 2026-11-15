@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.1.8-beta - 2026-11-15
+
+- Added a responsive Help tab with safe container, WireGuard, routing, redacted-config, Guest VPN, update, backup, and recovery guidance.
+- Added one-click copying of troubleshooting commands customized to the selected interface.
+
 ## 0.1.7-beta - 2026-11-15
 
 - Fixed ownership of the persistent SQLite backup directory during container startup.
