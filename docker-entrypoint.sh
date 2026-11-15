@@ -23,11 +23,14 @@ chown root:wgpanel /etc/wireguard/backups
 chmod 750 /etc/wireguard/backups
 
 wg_interface="${WGPANEL_INTERFACE:-wg0}"
-wg_config="/etc/wireguard/${wg_interface}.conf"
-if [ -f "$wg_config" ]; then
-  chown root:wgpanel "$wg_config"
-  chmod 640 "$wg_config"
-fi
+guest_interface="${WGPANEL_GUEST_INTERFACE:-wg1}"
+for configured_interface in "$wg_interface" "$guest_interface"; do
+  wg_config="/etc/wireguard/${configured_interface}.conf"
+  if [ -f "$wg_config" ]; then
+    chown root:wgpanel "$wg_config"
+    chmod 640 "$wg_config"
+  fi
+done
 
 if [ ! -c /dev/net/tun ]; then
   echo "warning: /dev/net/tun is not available; WireGuard operations may fail" >&2

@@ -305,7 +305,9 @@ def test_docker_entrypoint_permission_logic_is_documented():
     assert "mkdir -p /etc/wireguard" in text
     assert "chown root:wgpanel /etc/wireguard" in text
     assert "chmod 750 /etc/wireguard" in text
-    assert 'wg_config="/etc/wireguard/${wg_interface}.conf"' in text
+    assert 'wg_config="/etc/wireguard/${configured_interface}.conf"' in text
+    assert 'guest_interface="${WGPANEL_GUEST_INTERFACE:-wg1}"' in text
+    assert 'for configured_interface in "$wg_interface" "$guest_interface"' in text
     assert 'chown root:wgpanel "$wg_config"' in text
     assert 'chmod 640 "$wg_config"' in text
     assert "chmod 644" not in text
