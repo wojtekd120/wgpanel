@@ -14,16 +14,28 @@ if [ "$action" != "remove" ] && [ "$action" != "status" ]; then
     : "${GUEST_CIDR:?missing GUEST_CIDR}"
     : "${PUBLIC_UPLINK:?missing PUBLIC_UPLINK}"
     : "${VPS_PUBLIC_IPV4:?missing VPS_PUBLIC_IPV4}"
+    GUEST_DNS_IPV4="${GUEST_DNS_IPV4:-}"
     for interface_name in "$GUEST_INTERFACE" "$PRIVATE_WG_INTERFACE" "$PUBLIC_UPLINK"; do
         printf '%s\n' "$interface_name" | grep -Eq '^[a-zA-Z0-9_.-]+$' || {
             echo "invalid interface name" >&2
             exit 1
         }
     done
+    if [ -n "$GUEST_DNS_IPV4" ]; then
+        python3 -c 'import ipaddress,sys; ipaddress.IPv4Address(sys.argv[1])' "$GUEST_DNS_IPV4" || {
+            echo "invalid GUEST_DNS_IPV4" >&2
+            exit 1
+        }
+    fi
 fi
 
 render_rules() {
     output="$1"
+    dns_input_rules=""
+    if [ -n "$GUEST_DNS_IPV4" ]; then
+        dns_input_rules="        iifname \"$GUEST_INTERFACE\" ip saddr $GUEST_CIDR ip daddr $GUEST_DNS_IPV4 udp dport 53 counter accept comment \"WGPanel guest DNS UDP\"
+        iifname \"$GUEST_INTERFACE\" ip saddr $GUEST_CIDR ip daddr $GUEST_DNS_IPV4 tcp dport 53 counter accept comment \"WGPanel guest DNS TCP\""
+    fi
     umask 077
     cat >"$output" <<EOF
 table inet $table_name {
@@ -42,6 +54,7 @@ table inet $table_name {
 
     chain input_guard {
         type filter hook input priority -10; policy accept;
+$dns_input_rules
         iifname "$GUEST_INTERFACE" counter drop comment "WGPanel guests cannot access VPS services"
     }
 

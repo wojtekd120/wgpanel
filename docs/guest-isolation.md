@@ -34,6 +34,8 @@ Required policy:
 * anti-spoof source addresses not belonging to the guest pool;
 * masquerade only `10.10.20.0/24` arriving on `wg1` and leaving the actual
   public uplink;
+* optionally allow only TCP/UDP 53 to one explicitly configured local DNS
+  address, while keeping its web UI and every other VPS service blocked;
 * drop all IPv6 arriving on `wg1` for the IPv4-only MVP and omit IPv6
   AllowedIPs/address/DNS from guest profiles.
 

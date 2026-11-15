@@ -2,6 +2,7 @@
 
 ## 0.1.8-beta - 2026-11-15
 
+- Added an optional, narrowly scoped Guest-to-local-DNS exception for TCP/UDP 53 while keeping every other VPS service blocked.
 - Ensured both primary and guest WireGuard configs receive safe container-readable ownership during startup.
 - Added a responsive Help tab with safe container, WireGuard, routing, redacted-config, Guest VPN, update, backup, and recovery guidance.
 - Added one-click copying of troubleshooting commands customized to the selected interface.

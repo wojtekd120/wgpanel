@@ -83,5 +83,8 @@ def test_guest_firewall_is_fail_closed_and_idempotently_managed():
     assert 'iifname "$PRIVATE_WG_INTERFACE" oifname "$GUEST_INTERFACE" ct state new' in script
     assert 'iifname "$GUEST_INTERFACE" meta nfproto ipv6' in script
     assert 'iifname "$GUEST_INTERFACE" ip daddr $VPS_PUBLIC_IPV4' in script
+    assert "udp dport 53" in script
+    assert "tcp dport 53" in script
+    assert 'ip daddr $GUEST_DNS_IPV4' in script
     assert 'iifname "$GUEST_INTERFACE" counter drop comment "WGPanel guest fail-closed fallback"' in script
     assert 'delete table inet $table_name' in script

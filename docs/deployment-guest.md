@@ -42,6 +42,11 @@ Set `PUBLIC_UPLINK` and `VPS_PUBLIC_IPV4` to observed values. A collision is a
 hard stop; choose another guest subnet and update both firewall and WGPanel
 settings.
 
+To use a DNS resolver bound to a private VPS address, set for example
+`GUEST_DNS_IPV4=192.0.2.1`. This creates only TCP/UDP port 53 exceptions;
+the resolver web UI and all other services remain blocked. Leave it empty for
+the original no-local-services policy.
+
 ## 3. Create `wg1` without touching `wg0`
 
 This writes a new file only if `wg1.conf` does not exist:
@@ -86,6 +91,13 @@ sudo ufw allow 51821/udp comment 'WGPanel guest WireGuard'
 sudo ufw route allow in on wg1 out on eth0 from 10.10.20.0/24 to any comment 'WGPanel guest internet'
 ```
 
+When `GUEST_DNS_IPV4=192.0.2.1`, add matching UFW input exceptions as well:
+
+```bash
+sudo ufw allow in on wg1 to 192.0.2.1 port 53 proto udp comment 'WGPanel guest DNS UDP'
+sudo ufw allow in on wg1 to 192.0.2.1 port 53 proto tcp comment 'WGPanel guest DNS TCP'
+```
+
 Substitute the observed uplink; do not add a second copy when an equivalent
 rule already exists. Then start the interface:
 
@@ -109,6 +121,10 @@ WGPANEL_GUEST_CLIENT_ADDRESS_POOL=10.10.20.0/24
 WGPANEL_GUEST_SERVER_ADDRESS=10.10.20.1
 WGPANEL_GUEST_CLIENT_DNS=1.1.1.1
 ```
+
+Use `WGPANEL_GUEST_CLIENT_DNS=192.0.2.1` only when the nftables and UFW DNS
+exceptions above are installed and the resolver accepts queries from
+`10.10.20.0/24`.
 
 The existing `/etc/wireguard:/etc/wireguard:rw` mount already includes
 `wg1.conf`; no Docker socket or nftables capability is added. Rebuild and
