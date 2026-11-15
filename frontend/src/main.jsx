@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react'
+import React, { useEffect, useMemo, useRef, useState } from 'react'
 import { createRoot } from 'react-dom/client'
 import { Circle, Download, HelpCircle, KeyRound, LogOut, Moon, Plus, RefreshCw, RotateCcw, ShieldOff, Sun, Trash2, X } from 'lucide-react'
 import './styles.css'
@@ -30,7 +30,23 @@ const api = async (path, options = {}) => {
 }
 
 const formatDate = (value) => value ? new Date(value).toLocaleString() : 'none'
-const formatBytes = (value = 0) => `${value} B`
+const formatBytes = (value = 0) => {
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
+  let amount = Math.max(0, Number(value) || 0)
+  let unit = 0
+  while (amount >= 1024 && unit < units.length - 1) {
+    amount /= 1024
+    unit += 1
+  }
+  const digits = unit === 0 ? 0 : amount >= 100 ? 0 : amount >= 10 ? 1 : 2
+  return `${amount.toFixed(digits)} ${units[unit]}`
+}
+const formatMbps = (value = 0) => {
+  const speed = Math.max(0, Number(value) || 0)
+  const digits = speed >= 100 ? 0 : speed >= 10 ? 1 : speed >= 1 ? 2 : 3
+  return `${speed.toFixed(digits)} Mbps`
+}
+const wait = (milliseconds) => new Promise((resolve) => window.setTimeout(resolve, milliseconds))
 
 function Login({ onLogin }) {
   const [username, setUsername] = useState('admin')
@@ -252,11 +268,56 @@ function App() {
   const [result, setResult] = useState(null)
   const [selectedId, setSelectedId] = useState(null)
   const [deleteTarget, setDeleteTarget] = useState(null)
+  const [trafficSnapshot, setTrafficSnapshot] = useState(null)
+  const [trafficBusy, setTrafficBusy] = useState(false)
+  const trafficMeasurementId = useRef(0)
   const [theme, setTheme] = useState(() => localStorage.getItem('wgpanel-theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'))
   const [form, setForm] = useState({ name: '', peer_type: 'private', expires_at: '', no_expiration: true, dry_run: false, tunnel_mode: 'split', custom_allowed_ips: '', server_allowed_ips: '', client_dns: '' })
   const [edit, setEdit] = useState({ name: '', notes: '', expires_at: '', server_allowed_ips: '', tunnel_mode: 'split', client_allowed_ips: '', client_dns: '' })
 
-  const load = async () => {
+  const sampleTraffic = async (interfaceName = currentInterface) => {
+    if (trafficBusy) return
+    const measurementId = trafficMeasurementId.current + 1
+    trafficMeasurementId.current = measurementId
+    setTrafficBusy(true)
+    try {
+      const query = `?interface=${encodeURIComponent(interfaceName)}`
+      const first = await api(`/dashboard${query}`)
+      const startedAt = performance.now()
+      await wait(2000)
+      const second = await api(`/dashboard${query}`)
+      const elapsedSeconds = Math.max((performance.now() - startedAt) / 1000, 0.001)
+      const previousByKey = new Map((first.peers || []).map((peer) => [peer.public_key, peer]))
+      const peerRates = (second.peers || []).map((peer) => {
+        const previous = previousByKey.get(peer.public_key)
+        const rxBytes = previous ? Math.max(0, peer.transfer_rx - previous.transfer_rx) : 0
+        const txBytes = previous ? Math.max(0, peer.transfer_tx - previous.transfer_tx) : 0
+        return {
+          public_key: peer.public_key,
+          from_peer_mbps: (rxBytes * 8) / elapsedSeconds / 1_000_000,
+          to_peer_mbps: (txBytes * 8) / elapsedSeconds / 1_000_000,
+        }
+      })
+      if (trafficMeasurementId.current !== measurementId) return
+      setDashboard((current) => current?.interface === interfaceName ? second : current)
+      setTrafficSnapshot({
+        interface: interfaceName,
+        measured_at: new Date().toISOString(),
+        sample_seconds: elapsedSeconds,
+        peers: peerRates,
+        from_peers_mbps: peerRates.reduce((total, peer) => total + peer.from_peer_mbps, 0),
+        to_peers_mbps: peerRates.reduce((total, peer) => total + peer.to_peer_mbps, 0),
+      })
+    } catch (err) {
+      if (trafficMeasurementId.current === measurementId) {
+        setBanner(err.message || 'Unable to measure traffic')
+      }
+    } finally {
+      if (trafficMeasurementId.current === measurementId) setTrafficBusy(false)
+    }
+  }
+
+  const load = async ({ sampleAfterLoad = false } = {}) => {
     try {
       const setup = await fetch('/api/setup/status').then((r) => r.json()).catch(() => ({ setup_required: false }))
       setSetupRequired(setup.setup_required)
@@ -271,6 +332,7 @@ function App() {
       setCurrentInterface(selected.interface)
       setAuthed(true)
       if (!selectedId && peerRows.length) setSelectedId(peerRows[0].id)
+      if (sampleAfterLoad) sampleTraffic(selected.interface)
     } catch (err) {
       if (err.message === 'Not authenticated') setAuthed(false)
       else setBanner(err.message || 'Unable to load WGPanel data')
@@ -278,7 +340,7 @@ function App() {
   }
 
   useEffect(() => {
-    load()
+    load({ sampleAfterLoad: true })
   }, [])
 
   useEffect(() => {
@@ -287,6 +349,7 @@ function App() {
   }, [theme])
 
   const statusByKey = useMemo(() => new Map((dashboard?.peers || []).map((peer) => [peer.public_key, peer])), [dashboard])
+  const trafficByKey = useMemo(() => new Map((trafficSnapshot?.peers || []).map((peer) => [peer.public_key, peer])), [trafficSnapshot])
   const selectedPeer = peers.find((peer) => peer.id === selectedId)
   const selectedStatus = selectedPeer ? statusByKey.get(selectedPeer.public_key) : null
 
@@ -433,6 +496,9 @@ function App() {
 
   const switchInterface = async (value) => {
     try {
+      trafficMeasurementId.current += 1
+      setTrafficBusy(false)
+      setTrafficSnapshot(null)
       await api('/settings/interface', { method: 'POST', body: JSON.stringify({ interface: value }) })
       setCurrentInterface(value)
       setSelectedId(null)
@@ -517,7 +583,7 @@ function App() {
 
   if (setupRequired) return <Setup />
   if (window.location.pathname === '/setup') return <Setup disabled />
-  if (!authed) return <Login onLogin={load} />
+  if (!authed) return <Login onLogin={() => load({ sampleAfterLoad: true })} />
 
   return (
     <main className="app-shell">
@@ -533,7 +599,7 @@ function App() {
           <button className="icon-button" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')} title="Toggle theme">
             {theme === 'dark' ? <Sun size={18} /> : <Moon size={18} />}
           </button>
-          <button className="icon-button" onClick={load} title="Refresh"><RefreshCw size={18} /></button>
+          <button className="icon-button" onClick={() => load()} title="Refresh"><RefreshCw size={18} /></button>
           <button className="icon-button" onClick={logout} title="Logout"><LogOut size={18} /></button>
         </div>
       </header>
@@ -559,6 +625,24 @@ function App() {
         <div><span>Status</span><strong className={dashboard?.up ? 'ok' : 'down'}><Circle size={12} fill="currentColor" />{dashboard?.up ? 'Up' : 'Down'}</strong></div>
         <div><span>Peers</span><strong>{peers.length}</strong></div>
         <div><span>Pool</span><strong>{dashboard?.client_address_pool || '10.8.0.0/24'}</strong></div>
+      </section>
+
+      <section className="traffic-card">
+        <div className="traffic-heading">
+          <div>
+            <h2>Traffic snapshot · {currentInterface}</h2>
+            <p>Two-second measurement on login or on demand. No background polling.</p>
+          </div>
+          <button className="small-button" disabled={trafficBusy} onClick={() => sampleTraffic(currentInterface)}>
+            <RefreshCw className={trafficBusy ? 'spin' : ''} size={16} />
+            {trafficBusy ? 'Measuring...' : 'Measure now'}
+          </button>
+        </div>
+        <div className="traffic-totals">
+          <div><span>From peers</span><strong>{trafficSnapshot?.interface === currentInterface ? formatMbps(trafficSnapshot.from_peers_mbps) : 'Not measured'}</strong></div>
+          <div><span>To peers</span><strong>{trafficSnapshot?.interface === currentInterface ? formatMbps(trafficSnapshot.to_peers_mbps) : 'Not measured'}</strong></div>
+          <div><span>Measured</span><strong>{trafficSnapshot?.interface === currentInterface ? new Date(trafficSnapshot.measured_at).toLocaleTimeString() : '—'}</strong></div>
+        </div>
       </section>
 
       <section className="workspace">
@@ -623,6 +707,7 @@ function App() {
           </div>
           {peers.map((peer) => {
             const live = statusByKey.get(peer.public_key)
+            const speed = trafficByKey.get(peer.public_key)
             return (
               <div className={selectedId === peer.id ? 'peer-row selected' : 'peer-row'} key={peer.id} role="button" tabIndex="0" onClick={() => setSelectedId(peer.id)} onKeyDown={(event) => { if (event.key === 'Enter') setSelectedId(peer.id) }}>
                 <span>{peer.name}<small>{peer.peer_type === 'guest' ? 'Guest (isolated)' : 'Private'}</small></span>
@@ -634,7 +719,10 @@ function App() {
                   </span>
                   <small>{live?.latest_handshake ? new Date(live.latest_handshake * 1000).toLocaleString() : 'never'}</small>
                 </span>
-                <span>{live ? `${formatBytes(live.transfer_rx)} / ${formatBytes(live.transfer_tx)}` : '0 B / 0 B'}</span>
+                <span>
+                  {live ? `${formatBytes(live.transfer_rx)} / ${formatBytes(live.transfer_tx)}` : '0 B / 0 B'}
+                  <small>{speed ? `From: ${formatMbps(speed.from_peer_mbps)} · To: ${formatMbps(speed.to_peer_mbps)}` : 'Speed not measured'}</small>
+                </span>
                 <span className="row-actions">
                   {peer.managed ? (
                     <>
@@ -667,6 +755,8 @@ function App() {
             <div><span>Latest handshake</span><strong>{selectedStatus?.latest_handshake ? new Date(selectedStatus.latest_handshake * 1000).toLocaleString() : 'never'}</strong></div>
             <div><span>Activity</span><strong><span className={`badge activity ${selectedStatus?.activity_status === 'Active' ? 'on' : selectedStatus?.activity_status === 'Recent' ? 'recent' : selectedStatus?.activity_status === 'Stale' ? 'expired' : 'off'}`}>{selectedStatus?.activity_status || 'Never connected'}</span></strong></div>
             <div><span>RX / TX</span><strong>{selectedStatus ? `${formatBytes(selectedStatus.transfer_rx)} / ${formatBytes(selectedStatus.transfer_tx)}` : '0 B / 0 B'}</strong></div>
+            <div><span>From this peer</span><strong>{trafficByKey.has(selectedPeer.public_key) ? formatMbps(trafficByKey.get(selectedPeer.public_key).from_peer_mbps) : 'Not measured'}</strong></div>
+            <div><span>To this peer</span><strong>{trafficByKey.has(selectedPeer.public_key) ? formatMbps(trafficByKey.get(selectedPeer.public_key).to_peer_mbps) : 'Not measured'}</strong></div>
             <div className="wide key-line"><span>Public key</span><code>{selectedPeer.public_key}</code><button className="small-button" onClick={() => copyPublicKey(selectedPeer.public_key)}>Copy</button></div>
             <div className="wide"><span>Client config</span><strong>{selectedPeer.managed ? 'Client private key is not stored, so this config cannot be regenerated.' : 'Unmanaged peer. Client private key is not stored, so this config cannot be regenerated.'}</strong></div>
           </div>

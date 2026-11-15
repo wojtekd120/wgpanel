@@ -127,6 +127,17 @@ small { color: var(--muted); display: block; font-size: 12px; margin-top: 4px; }
 .ok { color: var(--success); }
 .down { color: var(--danger); }
 
+.traffic-card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin-bottom: 18px; padding: 16px; }
+.traffic-heading { align-items: center; display: flex; gap: 14px; justify-content: space-between; }
+.traffic-heading h2 { font-size: 17px; margin: 0 0 4px; }
+.traffic-heading p { color: var(--muted); font-size: 13px; margin: 0; }
+.traffic-totals { display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 14px; }
+.traffic-totals div { background: var(--soft); border-radius: 7px; display: grid; gap: 5px; padding: 12px; }
+.traffic-totals span { color: var(--muted); font-size: 12px; font-weight: 700; }
+.traffic-totals strong { font-size: 18px; }
+.spin { animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
 .workspace { align-items: start; display: grid; gap: 18px; grid-template-columns: 300px 1fr; }
 .create-panel, .edit-panel { display: grid; gap: 12px; padding: 16px; }
 .create-panel h2, .result h2, .edit-panel h2, .modal h2 { font-size: 17px; margin: 0 0 4px; }
@@ -207,7 +218,7 @@ small { color: var(--muted); display: block; font-size: 12px; margin-top: 4px; }
 
 @media (max-width: 860px) {
   .app-shell { padding: 14px; }
-  .stats, .workspace, .result, .details, .checklist, .help-grid { grid-template-columns: 1fr; }
+  .stats, .workspace, .result, .details, .checklist, .help-grid, .traffic-totals { grid-template-columns: 1fr; }
   .topbar { align-items: flex-start; flex-direction: column; }
   .actions { flex-wrap: wrap; justify-content: flex-start; width: 100%; }
   .actions select { flex: 1 1 180px; min-width: 0; }
@@ -222,6 +233,7 @@ small { color: var(--muted); display: block; font-size: 12px; margin-top: 4px; }
   .backup-row { align-items: stretch; flex-direction: column; gap: 10px; }
   .modal-actions { flex-wrap: wrap; }
   .summary-card { align-items: stretch; flex-direction: column; }
+  .traffic-heading { align-items: stretch; flex-direction: column; }
   .help-hero { align-items: stretch; flex-direction: column; gap: 12px; }
   .help-actions button { flex: 1 1 140px; }
   .fix-row { grid-template-columns: 1fr; }

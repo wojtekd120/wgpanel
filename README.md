@@ -1,6 +1,6 @@
 # WGPanel
 
-**Version:** `0.1.8-beta`
+**Version:** `0.1.9-beta`
 
 WGPanel is a self-hosted web UI for managing WireGuard peers.
 

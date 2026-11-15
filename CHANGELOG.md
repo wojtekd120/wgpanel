@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.1.9-beta - 2026-11-15
+
+- Added an on-demand two-second traffic snapshot with per-peer and aggregate Mbps rates.
+- Measures once after login and only when requested afterward; no background polling or traffic history is stored.
+- Supports both the selected private interface and the isolated Guest interface.
+- Improved cumulative WireGuard transfer counter formatting.
+
 ## 0.1.8-beta - 2026-11-15
 
 - Added an optional, narrowly scoped Guest-to-local-DNS exception for TCP/UDP 53 while keeping every other VPS service blocked.
